@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -105,7 +105,11 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     IkMax: number;
     thermalOk: boolean;
     faultWarning: boolean;
+    tripTime: number;
   } | null>(null);
+
+  // Track last calculation to prevent redundant calculations
+  const lastCalculationRef = useRef<string>("");
 
   // Auto-update fuse size based on total current (only if autoFuseSize is enabled)
   useEffect(() => {
@@ -129,6 +133,27 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(mainBoardData));
   }, [mainBoardData, storageKey]);
+
+  // Auto-calculate main board when data or apartments change
+  useEffect(() => {
+    if (onAddLog && apartments.length > 0) {
+      // Create a hash of current data to detect actual changes
+      const currentDataHash = JSON.stringify({
+        mainBoardData,
+        apartmentIds: apartments.map(a => a.id),
+      });
+
+      // Only calculate if data has actually changed since last calculation
+      if (currentDataHash !== lastCalculationRef.current) {
+        lastCalculationRef.current = currentDataHash;
+        try {
+          calculateMainBoard(false); // Auto calculation - don't show toast
+        } catch (error) {
+          console.error("Main board calculation error:", error);
+        }
+      }
+    }
+  }, [mainBoardData, apartments, onAddLog]);
 
   // Calculate total current from all units included in main board
   const calculateTotalCurrent = (): number => {
@@ -215,11 +240,13 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     });
   };
 
-  const calculateMainBoard = () => {
+  const calculateMainBoard = (showToast: boolean = true) => {
     const In = calculateTotalCurrent();
-    
+
     if (In <= 0) {
-      toast.error("Ingen enheder inkluderet i hovedtavlen");
+      if (showToast) {
+        toast.error("Ingen enheder inkluderet i hovedtavlen");
+      }
       return;
     }
 
@@ -599,6 +626,7 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       IkMax,
       thermalOk: isThermalOk,
       faultWarning,
+      tripTime,
     });
     
     // Add detailed logs to mellemregninger
@@ -610,7 +638,9 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       toast.warning(`Ved fejl i én leder falder Ik,min til ${IkMinFault.toFixed(0)} A`);
     }
 
-    toast.success("Hovedtavle beregnet");
+    if (showToast) {
+      toast.success("Hovedtavle beregnet");
+    }
   };
 
   const unitsInMainBoard = apartments.filter(apt => apt.includeInMainBoard !== false);
@@ -860,127 +890,109 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
 
       {/* Results */}
       {results && (
-        <Card>
+        <Card className="border-2 border-primary">
           <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <span>Resultater - Hovedtavle</span>
-              <Badge variant={parseInt(mainBoardData.parallelCables) > 1 ? "default" : "secondary"} className="text-sm">
-                {parseInt(mainBoardData.parallelCables) > 1 
-                  ? `${mainBoardData.parallelCables} × ${results.chosenSize} mm²` 
-                  : `${results.chosenSize} mm²`}
-              </Badge>
-            </CardTitle>
+            <CardTitle>Resultater – Hovedtavle</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Parallel Cable Info Box */}
+          <CardContent>
+            {/* Top Row: 3-column grid */}
+            <div className="grid grid-cols-3 gap-8">
+              <div>
+                <div className="text-xs text-muted-foreground mb-1">Enkelt kabel tværsnit</div>
+                <div className="text-xl font-bold">{results.chosenSize} mm²</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground mb-1">Total strøm</div>
+                <div className="text-xl font-bold">{results.totalCurrent.toFixed(2)} A</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground mb-1">Samlet længde</div>
+                <div className="text-xl font-bold">{results.totalLength.toFixed(1)} m</div>
+              </div>
+            </div>
+
+            {/* Parallel Cable Info if applicable */}
             {parseInt(mainBoardData.parallelCables) > 1 && (
-              <div className="p-3 bg-primary/10 border border-primary/30 rounded-lg">
-                <div className="flex items-start gap-2">
-                  <span className="text-lg">⚡</span>
-                  <div className="flex-1">
-                    <div className="font-semibold text-sm mb-1">
-                      {mainBoardData.parallelCables} parallelle kabler á {results.chosenSize} mm²
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      Samlet ækvivalent tværsnit: {(results.chosenSize * parseInt(mainBoardData.parallelCables)).toFixed(0)} mm²
-                    </div>
+              <div className="mt-6 p-4 bg-primary/10 border border-primary/30 rounded-lg">
+                <div className="font-semibold text-sm mb-1">
+                  {mainBoardData.parallelCables} parallelle kabler á {results.chosenSize} mm²
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Samlet ækvivalent tværsnit: {(results.chosenSize * parseInt(mainBoardData.parallelCables)).toFixed(0)} mm²
+                </div>
+              </div>
+            )}
+
+            {/* Second Row: 2-column grid */}
+            <div className="grid grid-cols-2 gap-8 mt-6">
+              <div>
+                <div className="text-xs text-muted-foreground mb-1">Spændingsfald</div>
+                <div className="text-xl font-bold">
+                  {results.totalVoltageDrop.toFixed(2)} V ({results.voltageDropPercent.toFixed(2)} %)
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground mb-1">Termisk kapacitet</div>
+                <div className="text-xl font-bold">
+                  {results.thermalOk ? '✓ OK' : '✗ Ikke OK'}
+                </div>
+              </div>
+            </div>
+
+            {/* Third Row: Short Circuit Results */}
+            <div className="mt-6">
+              <div className="text-sm font-semibold mb-3">Kortslutningsstrømme</div>
+              <div className="grid grid-cols-2 gap-8">
+                <div>
+                  <div className="text-xs text-muted-foreground mb-1">Ik,min (normal drift)</div>
+                  <div className="text-xl font-bold text-green-600">
+                    {results.IkMin.toFixed(0)} A
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground mb-1">Ik,max</div>
+                  <div className="text-xl font-bold">
+                    {results.IkMax.toFixed(0)} A
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Trip Time */}
+            <div className="mt-6">
+              <div className="text-xs text-muted-foreground mb-1">Springetid fra sikringskurve</div>
+              <div className="text-xl font-bold">
+                {results.tripTime.toFixed(4)} s
+              </div>
+            </div>
+
+            {/* Fault Warning if applicable */}
+            {parseInt(mainBoardData.parallelCables) > 1 && (
+              <div className={`mt-6 p-4 rounded-lg ${results.faultWarning ? 'bg-orange-100 dark:bg-orange-950/40 border border-orange-300' : 'bg-blue-50 dark:bg-blue-950/20 border border-blue-200'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold">Fejl i 1 leder (worst case)</span>
+                  {results.faultWarning && <span className="text-lg">⚠️</span>}
+                </div>
+                <div className={`text-xl font-bold ${results.faultWarning ? 'text-orange-600' : 'text-blue-600'}`}>
+                  {results.IkMinFault.toFixed(0)} A
+                </div>
+                <div className="text-xs mt-2">
+                  <div className={results.faultWarning ? 'text-orange-700 dark:text-orange-300 font-medium' : 'text-muted-foreground'}>
+                    ↓ {((1 - results.IkMinFault / results.IkMin) * 100).toFixed(0)}% reduktion
+                    (kun {parseInt(mainBoardData.parallelCables) - 1} kabler virker)
                   </div>
                 </div>
               </div>
             )}
-            
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Enkelt kabel tværsnit</Label>
-                <div className="text-2xl font-bold">
-                  {results.chosenSize} mm²
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Total strøm</Label>
-                <div className="text-2xl font-bold">
-                  {results.totalCurrent.toFixed(2)} A
-                </div>
-              </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Total længde</Label>
-                <div className="text-lg font-semibold">
-                  {results.totalLength.toFixed(1)} m
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">Spændingsfald</Label>
-                <div className="text-lg font-semibold">
-                  {results.voltageDropPercent.toFixed(2)} %
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              {/* Short Circuit Results */}
-              <div className="p-4 border rounded-lg bg-muted/30">
-                <div className="text-sm font-semibold mb-3">Kortslutningsstrømme</div>
-                
-                <div className="grid grid-cols-2 gap-4 mb-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs text-muted-foreground">Ik,min (normal drift)</Label>
-                    <div className="text-xl font-bold text-green-600">
-                      {results.IkMin.toFixed(0)} A
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {parseInt(mainBoardData.parallelCables) > 1 ? `Alle ${mainBoardData.parallelCables} kabler OK` : 'Enkelt kabel'}
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-muted-foreground">Ik,max</Label>
-                    <div className="text-xl font-bold">
-                      {results.IkMax.toFixed(0)} A
-                    </div>
-                  </div>
-                </div>
-                
-                {parseInt(mainBoardData.parallelCables) > 1 && (
-                  <div className={`p-3 rounded-lg ${results.faultWarning ? 'bg-orange-100 dark:bg-orange-950/40 border border-orange-300' : 'bg-blue-50 dark:bg-blue-950/20 border border-blue-200'}`}>
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs font-semibold">Fejl i 1 leder (worst case)</Label>
-                        {results.faultWarning && <span className="text-lg">⚠️</span>}
-                      </div>
-                      <div className={`text-2xl font-bold ${results.faultWarning ? 'text-orange-600' : 'text-blue-600'}`}>
-                        {results.IkMinFault.toFixed(0)} A
-                      </div>
-                      <div className="text-xs space-y-1">
-                        <div className={results.faultWarning ? 'text-orange-700 dark:text-orange-300 font-medium' : 'text-muted-foreground'}>
-                          ↓ {((1 - results.IkMinFault / results.IkMin) * 100).toFixed(0)}% reduktion 
-                          (kun {parseInt(mainBoardData.parallelCables) - 1} kabler virker)
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            
             {results.faultWarning && (
-              <Alert className="border-orange-500 bg-orange-50 dark:bg-orange-950/20">
+              <Alert className="mt-6 border-orange-500 bg-orange-50 dark:bg-orange-950/20">
                 <AlertDescription className="text-sm text-orange-900 dark:text-orange-100">
-                  <strong>Advarsel:</strong> Ved fejl i én parallel leder falder Ik,min fra {results.IkMin.toFixed(0)} A til {results.IkMinFault.toFixed(0)} A. 
+                  <strong>Advarsel:</strong> Ved fejl i én parallel leder falder Ik,min fra {results.IkMin.toFixed(0)} A til {results.IkMinFault.toFixed(0)} A.
                   Kontroller at sikringen stadig udløser tilstrækkeligt hurtigt ved denne lavere kortslutningsstrøm.
                 </AlertDescription>
               </Alert>
             )}
-
-            <div className="p-3 rounded-lg" style={{ backgroundColor: results.thermalOk ? 'hsl(var(--success)/0.1)' : 'hsl(var(--destructive)/0.1)' }}>
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">Termisk kapacitet</span>
-                <Badge variant={results.thermalOk ? "default" : "destructive"}>
-                  {results.thermalOk ? "OK" : "IKKE OK"}
-                </Badge>
-              </div>
-            </div>
           </CardContent>
         </Card>
       )}

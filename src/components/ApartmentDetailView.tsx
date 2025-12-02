@@ -699,9 +699,9 @@ export function ApartmentDetailView({
         tripTime
       });
       
-      // Send log
-      if (onAddLog && calculationSteps.length > 0) {
-        onAddLog(apartment.name, 'service', calculationSteps);
+      // Send log - only for apartments without shared service cables
+      if (onAddLog && calculationSteps.length > 0 && !apartment.sharedServiceCableId) {
+        onAddLog(`${apartment.name} - Individuel stikledning`, 'service', calculationSteps);
       }
     } catch (error) {
       console.error("Service cable calculation error:", error);
@@ -751,11 +751,11 @@ export function ApartmentDetailView({
   useEffect(() => {
     calculateServiceCable();
   }, [
-    apartment.serviceCable, 
+    apartment.serviceCable,
     // Only recalculate on segment changes if autoSize is true
     ...(apartment.serviceCable?.autoSize ? [apartment.serviceCableSegments] : []),
-    apartment.voltage, 
-    apartment.phases, 
+    apartment.voltage,
+    apartment.phases,
     apartment.cosPhi,
     apartment.dimensioningMethod,
     apartment.manualAmps,
@@ -766,6 +766,170 @@ export function ApartmentDetailView({
     apartment.individualServiceCableCalculationMethod,
     apartment.diversityFactor,
     apartment.manualServiceCableAmps
+  ]);
+
+  // Beregn grupper med mellemregninger automatically
+  const calculateApartmentGroups = () => {
+    try {
+      const allSteps: CalculationStep[][] = [];
+
+      const updatedGroups: GroupData[] = apartment.groups.map((group, idx) => {
+        const steps: CalculationStep[] = [];
+
+        // Beregn netspænding automatisk baseret på fasesystem
+        const Uv = group.phase === "3-faset" ? 400 : 230;
+
+        const In = parseFloat(group.In.replace(",", "."));
+        const cos = parseFloat(group.cosPhi.replace(",", "."));
+        const duMax = parseFloat(group.maxVoltageDrop.replace(",", "."));
+        const KjJord = parseFloat(group.KjJord.replace(",", ".") || "1.0");
+
+        if (![In, cos, duMax, KjJord].every((v) => isFinite(v))) {
+          return group;
+        }
+
+        const activeSegments = group.segments.filter((s) => s.length > 0);
+        const totalLength = activeSegments.reduce((sum, s) => sum + s.length, 0);
+
+        if (activeSegments.length === 0) {
+          return group;
+        }
+
+        let newGroup = group;
+        let chosenSq = 0;
+        let totalVoltageDropPercent = 0;
+
+        if (group.autoSize) {
+          const segInputs = activeSegments.map((s) => ({
+            refMethod: s.installMethod,
+            length: s.length,
+            cores: s.loadedConductors,
+            kt: s.kt,
+            kgrp: s.kgrp,
+          }));
+
+          const result = autoSelectGroupCableSize(
+            In,
+            Uv,
+            group.material,
+            group.phase,
+            cos,
+            duMax,
+            KjJord,
+            segInputs,
+          );
+
+          if (result.chosenSize) {
+            chosenSq = result.chosenSize;
+            totalVoltageDropPercent = result.totalVoltageDropPercent;
+
+            const segments = group.segments.map((seg) =>
+              seg.length > 0 ? { ...seg, crossSection: result.chosenSize } : seg,
+            );
+
+            newGroup = { ...group, segments };
+
+            // Step 1: Auto tværsnitsvalg
+            steps.push({
+              category: 'overbelastning',
+              formula: "Auto tværsnitsvalg (Iz-kontrol + spændingsfaldskontrol)",
+              variables: `In,gruppe = ${In.toFixed(1)} A\nMaterial = ${group.material}\nFasesystem = ${group.phase}\nΔU_max = ${duMax.toFixed(2)}%`,
+              calculation: `Tester standardstørrelser og vælger mindste der opfylder:\n- Iz,korr ≥ In for alle segmenter\n- ΔU_total ≤ ${duMax.toFixed(2)}%`,
+              result: `Valgt tværsnit: ${result.chosenSize.toFixed(1)} mm²`
+            });
+
+            // Detaljeret Iz-kontrol for hvert segment
+            for (let i = 0; i < activeSegments.length; i++) {
+              const seg = activeSegments[i];
+              const iz = lookupIz(group.material, seg.installMethod, result.chosenSize, seg.loadedConductors, seg.insulationType || "XLPE");
+              const env = seg.installMethod.startsWith("D") ? "jord" : "luft";
+              const Kj = env === "jord" ? KjJord : 1.0;
+              const IzCorr = iz * seg.kt * Kj * seg.kgrp;
+
+              steps.push({
+                category: 'overbelastning',
+                formula: `Overbelastningsbeskyttelse - Segment ${i + 1}`,
+                variables: `Iz,20°C = ${iz.toFixed(1)} A (fra tabel)\nKt = ${seg.kt.toFixed(2)}\nKj = ${Kj.toFixed(2)}\nKgrp = ${seg.kgrp.toFixed(2)}\nIn = ${In.toFixed(1)} A`,
+                calculation: `Iz,korr = Iz,20°C × Kt × Kj × Kgrp\nIz,korr = ${iz.toFixed(1)} × ${seg.kt.toFixed(2)} × ${Kj.toFixed(2)} × ${seg.kgrp.toFixed(2)}`,
+                result: `Iz,korr = ${IzCorr.toFixed(1)} A\n${In <= IzCorr ? '✓' : '✗'} In ≤ Iz,korr (${In.toFixed(1)} A ≤ ${IzCorr.toFixed(1)} A)`
+              });
+            }
+
+            // Detaljeret spændingsfaldsberegning
+            let duTotalCalc = 0;
+            const duSegments: string[] = [];
+            for (let i = 0; i < activeSegments.length; i++) {
+              const seg = activeSegments[i];
+              const { du, duPercent } = voltageDropDs(Uv, In, group.material, result.chosenSize, seg.length, group.phase, cos);
+              duTotalCalc += du;
+              duSegments.push(`Segment ${i + 1}: ΔU = ${du.toFixed(2)} V (${duPercent.toFixed(2)}%)`);
+
+              steps.push({
+                category: 'spændingsfald',
+                formula: `Spændingsfald - Segment ${i + 1}`,
+                variables: `L = ${seg.length.toFixed(1)} m\nS = ${result.chosenSize.toFixed(1)} mm²\nI = ${In.toFixed(1)} A\ncos φ = ${cos.toFixed(2)}\nMaterial = ${group.material}\nFase = ${group.phase}`,
+                calculation: `ΔU = k × L × I / S (forenklet DS-formel)\nk = materialekonstant`,
+                result: `ΔU = ${du.toFixed(2)} V (${duPercent.toFixed(2)}%)`
+              });
+            }
+
+            steps.push({
+              category: 'spændingsfald',
+              formula: "Total spændingsfald",
+              variables: duSegments.join('\n'),
+              calculation: `ΔU_total = ${duSegments.length > 1 ? 'Σ ΔU_segmenter' : 'ΔU_segment1'}`,
+              result: `ΔU_total = ${duTotalCalc.toFixed(2)} V (${totalVoltageDropPercent.toFixed(2)}%)\n${totalVoltageDropPercent <= duMax ? '✓' : '✗'} ΔU ≤ ${duMax.toFixed(2)}%`
+            });
+          }
+        }
+
+        allSteps.push(steps);
+        return newGroup;
+      });
+
+      // Log calculations
+      for (let idx = 0; idx < updatedGroups.length; idx++) {
+        const group = updatedGroups[idx];
+        if (allSteps[idx] && allSteps[idx].length > 0) {
+          // Determine service cable name
+          let serviceCableName = "Individuelle stikledninger";
+          if (apartment.sharedServiceCableId) {
+            const sharedCable = sharedServiceCables.find(c => c.id === apartment.sharedServiceCableId);
+            if (sharedCable) {
+              serviceCableName = sharedCable.name;
+            }
+          }
+          onAddLog?.(`${serviceCableName}||${apartment.name}||Gruppe ${group.name}`, "group", allSteps[idx]);
+        }
+      }
+
+      // Update groups if they changed
+      const groupsChanged = updatedGroups.some((g, idx) =>
+        apartment.groups[idx].segments.some((seg, sIdx) =>
+          seg.crossSection !== g.segments[sIdx]?.crossSection
+        )
+      );
+
+      if (groupsChanged) {
+        onUpdate({ groups: updatedGroups });
+      }
+
+    } catch (error) {
+      console.error("Group calculation error:", error);
+    }
+  };
+
+  // Auto-calculate groups when they change
+  useEffect(() => {
+    if (apartment.groups && apartment.groups.length > 0 && serviceCableResults) {
+      calculateApartmentGroups();
+    }
+  }, [
+    apartment.groups,
+    serviceCableResults,
+    apartment.cosPhi,
+    onAddLog,
+    onUpdate
   ]);
 
   return (
@@ -1625,102 +1789,212 @@ export function ApartmentDetailView({
         </TabsContent>
 
         <TabsContent value="groups" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle>Grupper</CardTitle>
-                  <CardDescription>Konfigurer lejlighedens elektriske grupper</CardDescription>
+          {apartment.groups.map((group) => (
+            <Card key={group.id}>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-2 flex-1">
+                    <CardTitle>{group.name}</CardTitle>
+                    <CardDescription>Beregn gruppe med automatisk tværsnitsvalg og spændingsfald.</CardDescription>
+                  </div>
+                  {apartment.groups.length > 1 && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeGroup(group.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
                 </div>
-                <Button onClick={addGroup} size="sm">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Tilføj gruppe
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {apartment.groups.map((group, idx) => (
-                <Card key={group.id} className="border-2">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <Input
-                        value={group.name}
-                        onChange={(e) => updateGroup(group.id, { name: e.target.value })}
-                        className="font-semibold w-32"
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {/* Group Name */}
+                <div className="space-y-2">
+                  <Label>Gruppenavn</Label>
+                  <Input
+                    value={group.name}
+                    onChange={(e) => updateGroup(group.id, { name: e.target.value })}
+                    placeholder="f.eks. Køkken"
+                  />
+                </div>
+
+                {/* Group Settings */}
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>Sikringstype gruppe</Label>
+                    <Select
+                      value={group.fuseType}
+                      onValueChange={(v) => updateGroup(group.id, { fuseType: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="MCB B">MCB B</SelectItem>
+                        <SelectItem value="MCB C">MCB C</SelectItem>
+                        <SelectItem value="MCB D">MCB D</SelectItem>
+                        <SelectItem value="gG">gG</SelectItem>
+                        <SelectItem value="aM">aM</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Sikrings størrelse gruppe [A]</Label>
+                    <Select
+                      value={group.In}
+                      onValueChange={(v) => updateGroup(group.id, { In: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[6, 10, 13, 16, 20, 25, 32, 40, 50, 63].map(size => (
+                          <SelectItem key={size} value={size.toString()}>{size}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Fasesystem</Label>
+                    <Select
+                      value={group.phase}
+                      onValueChange={(v) => updateGroup(group.id, { phase: v as PhaseSystem })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1-faset">1-faset</SelectItem>
+                        <SelectItem value="3-faset">3-faset</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>cos φ (gruppe)</Label>
+                    <Input
+                      value={group.cosPhi}
+                      onChange={(e) => updateGroup(group.id, { cosPhi: e.target.value })}
+                      placeholder="0.95"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Maks ΔU total [%]</Label>
+                    <Input
+                      value={group.maxVoltageDrop}
+                      onChange={(e) => updateGroup(group.id, { maxVoltageDrop: e.target.value })}
+                      placeholder="3"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Kj (jordtemp.-faktor)</Label>
+                    <Input
+                      value={group.KjJord}
+                      onChange={(e) => updateGroup(group.id, { KjJord: e.target.value })}
+                      placeholder="1"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Materiale</Label>
+                  <Select
+                    value={group.material}
+                    onValueChange={(v) => updateGroup(group.id, { material: v as Material })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Cu">Kobber (Cu)</SelectItem>
+                      <SelectItem value="Al">Aluminium (Al)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Auto tværsnit</Label>
+                  <Select
+                    value={group.autoSize ? "Ja (auto)" : "Nej (manuel)"}
+                    onValueChange={(v) => updateGroup(group.id, { autoSize: v === "Ja (auto)" })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Ja (auto)">Ja (auto)</SelectItem>
+                      <SelectItem value="Nej (manuel)">Nej (manuel)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Segments */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-base font-semibold">Kabel fremføringmetode</Label>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => addSegmentToGroup(group.id)}
+                    >
+                      <Plus className="h-3 w-3 mr-1" />
+                      Segment af kabel
+                    </Button>
+                  </div>
+                  {group.segments.map((seg, segIdx) => (
+                    <div key={segIdx} className="relative mt-2">
+                      <SegmentInput
+                        segment={seg}
+                        onChange={(data) => updateGroupSegment(group.id, segIdx, data)}
                       />
-                      {apartment.groups.length > 1 && (
+                      {group.segments.length > 1 && (
                         <Button
                           variant="ghost"
                           size="icon"
-                          onClick={() => removeGroup(group.id)}
+                          className="absolute top-2 right-2"
+                          onClick={() => removeSegmentFromGroup(group.id, segIdx)}
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="h-3 w-3" />
                         </Button>
                       )}
                     </div>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label>In (A)</Label>
-                        <Input
-                          value={group.In}
-                          onChange={(e) => updateGroup(group.id, { In: e.target.value })}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Fasesystem</Label>
-                        <Select
-                          value={group.phase}
-                          onValueChange={(v) => updateGroup(group.id, { phase: v as PhaseSystem })}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="1-faset">1-faset</SelectItem>
-                            <SelectItem value="3-faset">3-faset</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          ))}
 
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label>Segmenter</Label>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => addSegmentToGroup(group.id)}
-                        >
-                          <Plus className="h-3 w-3 mr-1" />
-                          Tilføj
-                        </Button>
-                      </div>
-                      {group.segments.map((seg, segIdx) => (
-                        <div key={segIdx} className="relative">
-                          <SegmentInput
-                            segment={seg}
-                            onChange={(data) => updateGroupSegment(group.id, segIdx, data)}
-                          />
-                          {group.segments.length > 1 && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="absolute top-2 right-2"
-                              onClick={() => removeSegmentFromGroup(group.id, segIdx)}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </CardContent>
-          </Card>
+          {apartment.groups.length === 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Grupper</CardTitle>
+                <CardDescription>Beregn flere grupper med automatisk tværsnitsvalg og spændingsfald.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="text-center py-8 text-muted-foreground">
+                  <p className="mb-4">Ingen grupper oprettet endnu</p>
+                  <Button onClick={addGroup}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Opret første gruppe
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {apartment.groups.length > 0 && (
+            <Card>
+              <CardHeader>
+                <Button onClick={addGroup} size="sm">
+                  <Plus className="h-4 w-4 mr-2" />
+                  Ny gruppe
+                </Button>
+              </CardHeader>
+            </Card>
+          )}
         </TabsContent>
       </Tabs>
     </div>

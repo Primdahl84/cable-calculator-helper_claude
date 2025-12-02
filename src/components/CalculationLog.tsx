@@ -108,10 +108,13 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
     );
   }
 
-  const activeLogId = selectedLogId || logs[0]?.id;
-  const activeLog = logs.find(log => log.id === activeLogId);
-  const serviceLogs = logs.filter(log => log.type === 'service');
+  const mainboardLogs = logs.filter(log => log.type === 'service' && log.title.includes('Hovedtavle'));
+  const serviceLogs = logs.filter(log => log.type === 'service' && !log.title.includes('Hovedtavle'));
   const groupLogs = logs.filter(log => log.type === 'group');
+
+  // Determine the active log based on what's selected, or use the first log from the current tab
+  const activeLogId = selectedLogId || serviceLogs[0]?.id || groupLogs[0]?.id || mainboardLogs[0]?.id || logs[0]?.id;
+  const activeLog = logs.find(log => log.id === activeLogId);
 
   return (
     <div className="space-y-4">
@@ -123,23 +126,24 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
         </Button>
       </div>
 
-      <Tabs defaultValue="service" className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
+      <Tabs defaultValue="mainboard" className="w-full">
+        <TabsList className="grid w-full grid-cols-3">
+          <TabsTrigger value="mainboard">Hovedtavle</TabsTrigger>
           <TabsTrigger value="service">Stikledning</TabsTrigger>
           <TabsTrigger value="groups">Grupper</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="service" className="space-y-4 mt-4">
-          {serviceLogs.length === 0 ? (
+        <TabsContent value="mainboard" className="space-y-4 mt-4">
+          {mainboardLogs.length === 0 ? (
             <Card>
               <CardContent className="py-12">
                 <p className="text-center text-muted-foreground">
-                  Ingen stikledningsberegninger endnu
+                  Ingen hovedtavleberegninger endnu
                 </p>
               </CardContent>
             </Card>
           ) : (
-            serviceLogs.map((log) => (
+            mainboardLogs.map((log) => (
               <Card key={log.id}>
                 <CardHeader>
                   <CardTitle className="text-lg">{log.title}</CardTitle>
@@ -161,26 +165,25 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
           )}
         </TabsContent>
 
-        <TabsContent value="groups" className="space-y-4 mt-4">
-          {groupLogs.length === 0 ? (
+        <TabsContent value="service" className="space-y-4 mt-4">
+          {serviceLogs.length === 0 ? (
             <Card>
               <CardContent className="py-12">
                 <p className="text-center text-muted-foreground">
-                  Ingen gruppeberegninger endnu
+                  Ingen stikledningsberegninger endnu
                 </p>
               </CardContent>
             </Card>
           ) : (
             <div className="space-y-4">
               <div className="flex flex-wrap gap-2 p-4 bg-muted/30 rounded-lg border">
-                {groupLogs.map((log) => (
+                {serviceLogs.map((log) => (
                   <Button
                     key={log.id}
                     variant={activeLogId === log.id ? "default" : "outline"}
                     size="sm"
                     onClick={() => {
                       setSelectedLogId(log.id);
-                      console.log("Switched to group:", log.title);
                     }}
                     className="transition-all"
                   >
@@ -189,7 +192,7 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
                 ))}
               </div>
 
-              {activeLog && activeLog.type === 'group' ? (
+              {activeLog && activeLog.type === 'service' ? (
                 <Card key={activeLog.id} className="animate-in fade-in-50 duration-300">
                   <CardHeader>
                     <CardTitle className="text-lg">{activeLog.title}</CardTitle>
@@ -211,11 +214,157 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
                 <Card>
                   <CardContent className="py-12">
                     <p className="text-center text-muted-foreground">
-                      Vælg en gruppe for at se beregninger
+                      Vælg en stikledning for at se beregninger
                     </p>
                   </CardContent>
                 </Card>
               )}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="groups" className="space-y-4 mt-4">
+          {groupLogs.length === 0 ? (
+            <Card>
+              <CardContent className="py-12">
+                <p className="text-center text-muted-foreground">
+                  Ingen gruppeberegninger endnu
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              {/* Organize groups by service cable, then by apartment */}
+              {(() => {
+                // Parse logs with new format: "serviceCable||apartment||Gruppe name"
+                // Fallback to old format: "apartment - Gruppe name"
+                const groupedByServiceCable = groupLogs.reduce((acc, log) => {
+                  let serviceCable = "Individuelle stikledninger";
+                  let apartmentName = "Andre";
+                  let groupeName = log.title;
+
+                  if (log.title.includes("||")) {
+                    const parts = log.title.split("||");
+                    serviceCable = parts[0];
+                    apartmentName = parts[1];
+                    groupeName = parts[2];
+                  } else {
+                    // Fallback to old format
+                    const apartmentMatch = log.title.match(/^(.*?)\s*-\s*Gruppe/);
+                    if (apartmentMatch) {
+                      apartmentName = apartmentMatch[1];
+                      groupeName = `Gruppe ${log.title.split(" - Gruppe ")[1]}`;
+                    }
+                  }
+
+                  if (!acc[serviceCable]) {
+                    acc[serviceCable] = {};
+                  }
+                  if (!acc[serviceCable][apartmentName]) {
+                    acc[serviceCable][apartmentName] = [];
+                  }
+                  acc[serviceCable][apartmentName].push(log);
+                  return acc;
+                }, {} as Record<string, Record<string, typeof groupLogs>>);
+
+                const serviceCableOrder = [
+                  "Fælles stikledning A",
+                  "Fælles stikledning B",
+                  "Fælles stikledning C",
+                  "Individuelle stikledninger"
+                ];
+                const sortedServiceCables = Object.keys(groupedByServiceCable).sort((a, b) => {
+                  const aIndex = serviceCableOrder.indexOf(a);
+                  const bIndex = serviceCableOrder.indexOf(b);
+                  if (aIndex === -1) return 1;
+                  if (bIndex === -1) return -1;
+                  return aIndex - bIndex;
+                });
+
+                return (
+                  <Tabs defaultValue={sortedServiceCables[0]} className="w-full">
+                    <TabsList className="grid w-full" style={{ gridTemplateColumns: `repeat(${Math.min(sortedServiceCables.length, 4)}, 1fr)` }}>
+                      {sortedServiceCables.map((serviceCable) => (
+                        <TabsTrigger
+                          key={serviceCable}
+                          value={serviceCable}
+                          className="text-sm"
+                        >
+                          {serviceCable}
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+
+                    {sortedServiceCables.map((serviceCable) => (
+                      <TabsContent key={serviceCable} value={serviceCable} className="space-y-4 mt-4">
+                        <Tabs defaultValue={Object.keys(groupedByServiceCable[serviceCable])[0]} className="w-full">
+                          <TabsList className="grid w-full gap-2 mb-4 h-auto" style={{ gridTemplateColumns: `repeat(${Math.min(Object.keys(groupedByServiceCable[serviceCable]).length, 4)}, 1fr)` }}>
+                            {Object.keys(groupedByServiceCable[serviceCable]).map((apartmentName) => (
+                              <TabsTrigger
+                                key={apartmentName}
+                                value={apartmentName}
+                                className="text-sm"
+                              >
+                                {apartmentName}
+                              </TabsTrigger>
+                            ))}
+                          </TabsList>
+
+                          {Object.entries(groupedByServiceCable[serviceCable]).map(([apartmentName, apartmentLogs]) => (
+                            <TabsContent key={apartmentName} value={apartmentName} className="space-y-4 mt-4">
+                              <div className="flex flex-wrap gap-2 p-4 bg-muted/30 rounded-lg border">
+                                {apartmentLogs.map((log) => (
+                                  <Button
+                                    key={log.id}
+                                    variant={activeLogId === log.id ? "default" : "outline"}
+                                    size="sm"
+                                    onClick={() => {
+                                      setSelectedLogId(log.id);
+                                    }}
+                                    className="transition-all text-xs"
+                                  >
+                                    {log.title.includes("||") ? log.title.split("||")[2] : (log.title.split(" - Gruppe ")[1] ? `Gruppe ${log.title.split(" - Gruppe ")[1]}` : log.title)}
+                                  </Button>
+                                ))}
+                              </div>
+
+                              {activeLog && activeLog.type === 'group' && apartmentLogs.find(l => l.id === activeLogId) ? (
+                                <Card key={activeLog.id} className="animate-in fade-in-50 duration-300">
+                                  <CardHeader>
+                                    <CardTitle className="text-lg">
+                                      {activeLog.title.includes("||") ? activeLog.title.split("||")[2] : activeLog.title}
+                                    </CardTitle>
+                                    <CardDescription>
+                                      {activeLog.timestamp.toLocaleTimeString()} - {activeLog.timestamp.toLocaleDateString()}
+                                    </CardDescription>
+                                  </CardHeader>
+                                  <CardContent>
+                                    <ScrollArea className="h-[600px] w-full">
+                                      <div className="space-y-6 pr-4">
+                                        {activeLog.steps.map((step, stepIdx) => (
+                                          <CalculationStepDisplay key={stepIdx} step={step} />
+                                        ))}
+                                      </div>
+                                    </ScrollArea>
+                                  </CardContent>
+                                </Card>
+                              ) : (
+                                <Card>
+                                  <CardContent className="py-12">
+                                    <p className="text-center text-muted-foreground">
+                                      Vælg en gruppe for at se beregninger
+                                    </p>
+                                  </CardContent>
+                                </Card>
+                              )}
+                            </TabsContent>
+                          ))}
+                        </Tabs>
+                      </TabsContent>
+                    ))}
+                  </Tabs>
+                );
+              })()}
             </div>
           )}
         </TabsContent>

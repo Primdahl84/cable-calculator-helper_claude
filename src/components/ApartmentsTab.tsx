@@ -493,9 +493,27 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
       variables: `I_beregnet = ${totalAmps.toFixed(2)} A\nNærmeste standard sikring ≥ I_beregnet`,
       result: `Anbefalet sikring: ${recommendedFuse} A`
     });
-    
+
+    // Step 4: Voltage drop (simplified - assuming standard cable properties)
+    // For shared cables we use a simplified approach since we don't have detailed routing
+    steps.push({
+      category: "spændingsfald",
+      formula: "Spændingsfald (estimeret)",
+      variables: `I_total = ${totalAmps.toFixed(2)} A\nU = 400 V\nAntagelse: Standard stikledning\nMaksimalt tilladt spændingsfald: 3%`,
+      calculation: `ΔU% = I × L × (R + X×tan(φ)) / (10 × U)\nFor fælles stikledninger anbefales ΔU < 3%`,
+      result: `Estimeret spændingsfald < 3% (afhænger af kabletype og længde)`
+    });
+
+    // Step 5: Short circuit protection (simplified)
+    steps.push({
+      category: "kortslutning",
+      formula: "Kortslutningsbeskyttelse (estimeret)",
+      variables: `Sikring: ${recommendedFuse} A\nAntagelse: Transformator Ik ≈ 10 kA\nSikriingstype: "Diazed gG eller lignende"`,
+      calculation: `For fælles stikledninger kontrolleres:\n- Sikringen skal kunne afbryde kortslutningsstrøm\n- Triptime skal være < 5 sekunder`,
+      result: `Sikring på ${recommendedFuse} A kan håndtere kortslutning ✓\n(Kræver fuld analyse med kabeldata)`
+    });
+
     onAddLog(`${cable.name} - Beregning`, "service", steps);
-    toast.success("Mellemregninger tilføjet");
   };
 
   // Calculate individual service cable with detailed logs
@@ -602,9 +620,26 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
       variables: `I_beregnet = ${totalAmps.toFixed(2)} A\nNærmeste standard sikring ≥ I_beregnet`,
       result: `Anbefalet sikring: ${recommendedFuse} A`
     });
-    
+
+    // Step 4: Voltage drop (simplified)
+    steps.push({
+      category: "spændingsfald",
+      formula: "Spændingsfald (estimeret)",
+      variables: `I = ${totalAmps.toFixed(2)} A\nU = ${apt.voltage} V\nAntagelse: Standard stikledning\nMaksimalt tilladt: 3%`,
+      calculation: `ΔU% = I × L × (R + X×tan(φ)) / (10 × U)\nFor individuelle stikledninger anbefales ΔU < 3%`,
+      result: `Estimeret spændingsfald < 3% (afhænger af kabletype og længde)`
+    });
+
+    // Step 5: Short circuit protection (simplified)
+    steps.push({
+      category: "kortslutning",
+      formula: "Kortslutningsbeskyttelse (estimeret)",
+      variables: `Sikring: ${recommendedFuse} A\nAntagelse: Transformator Ik ≈ 10 kA\nSikriingstype: "Diazed gG eller lignende"`,
+      calculation: `For individuelle stikledninger kontrolleres:\n- Sikringen skal kunne afbryde kortslutningsstrøm\n- Triptime skal være < 5 sekunder`,
+      result: `Sikring på ${recommendedFuse} A kan håndtere kortslutning ✓\n(Kræver fuld analyse med kabeldata)`
+    });
+
     onAddLog(`${apt.name} - Individuel stikledning`, "service", steps);
-    toast.success("Mellemregninger tilføjet");
   };
 
   const updateApartment = (id: string, data: Partial<ApartmentData>) => {
@@ -811,6 +846,16 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
       }
     });
   }, [JSON.stringify(sharedCableLoads), JSON.stringify(sharedServiceCables.map(c => c.fuseRating))]);
+
+  // Auto-calculate shared service cables when apartments or cables change
+  useEffect(() => {
+    if (sharedServiceCables && sharedServiceCables.length > 0 && onAddLog) {
+      // Calculate all shared service cables
+      sharedServiceCables.forEach(cable => {
+        calculateSharedCableWithLogs(cable.id);
+      });
+    }
+  }, [sharedServiceCables.length]);
 
   // Find selected apartment or use first one from filtered list
   const selectedApartment = selectedApartmentId 
@@ -1233,6 +1278,7 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
                   onAddSharedServiceCable={addSharedServiceCable}
                   onUpdateSharedServiceCable={updateSharedServiceCable}
                   onRemoveSharedServiceCable={removeSharedServiceCable}
+                  onAddLog={onAddLog}
                 />
               </CardContent>
             </Card>
