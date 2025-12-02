@@ -904,8 +904,8 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
         </CardContent>
       </Card>
 
-      {/* Results */}
-      {results && (
+      {/* Results - Only show full results if fuse size is available */}
+      {results && !results.fuseUnavailableWarning && (
         <Card className="border-2 border-primary">
           <CardHeader>
             <CardTitle>Resultater – Hovedtavle</CardTitle>
@@ -1017,6 +1017,30 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                 </AlertDescription>
               </Alert>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Fuse Unavailable Warning */}
+      {results?.fuseUnavailableWarning && (
+        <Card className="border-2 border-red-500 bg-red-50/50 dark:bg-red-950/20">
+          <CardHeader>
+            <CardTitle className="text-red-700 dark:text-red-300">Sikring ikke tilgængelig</CardTitle>
+            <CardDescription className="text-red-600 dark:text-red-400">
+              Den valgte sikringstype og størrelse findes ikke i tabelerne
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              <div className="text-sm text-red-900 dark:text-red-100 whitespace-pre-line font-medium">
+                {results.fuseUnavailableWarning}
+              </div>
+              <div className="pt-4 border-t border-red-200 dark:border-red-800">
+                <p className="text-sm text-red-800 dark:text-red-200">
+                  Venligst vælg en af de tilgængelige størrelser eller skift til en anden sikringstype for at fortsætte beregningen.
+                </p>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}
