@@ -412,6 +412,32 @@ export function autoSelectMcbType(installMethod: string, In: number, IkMin?: num
   return "MCB C";
 }
 
+// Check if a fuse type exists and get available sizes
+export function getAvailableFuseSizes(
+  manufacturer: string,
+  fuseType: string,
+): number[] {
+  const key = fuseKey(manufacturer, fuseType);
+  const entry = FUSE_DB[key];
+  if (!entry) {
+    return [];
+  }
+  return Object.keys(entry.curves)
+    .map((k) => Number(k))
+    .sort((a, b) => a - b);
+}
+
+// Check if a specific fuse size is available for a fuse type
+export function isFuseSizeAvailable(
+  manufacturer: string,
+  fuseType: string,
+  In: number,
+): boolean {
+  const sizes = getAvailableFuseSizes(manufacturer, fuseType);
+  const InInt = Math.round(In);
+  return sizes.includes(InInt);
+}
+
 export function getFuseData(
   manufacturer: string,
   fuseType: string,

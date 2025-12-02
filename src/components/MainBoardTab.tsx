@@ -19,7 +19,7 @@ import {
   thermalOk,
   STANDARD_SIZES,
 } from "@/lib/calculations";
-import { getFuseData, fuseTripTimeExplain } from "@/lib/fuseCurves";
+import { getFuseData, fuseTripTimeExplain, isFuseSizeAvailable, getAvailableFuseSizes } from "@/lib/fuseCurves";
 import { useProject } from "@/contexts/ProjectContext";
 
 // Standard fuse sizes in amperes
@@ -106,6 +106,7 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     thermalOk: boolean;
     faultWarning: boolean;
     tripTime: number;
+    fuseUnavailableWarning: string;
   } | null>(null);
 
   // Track last calculation to prevent redundant calculations
@@ -361,19 +362,33 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     // Check thermal capacity using worst case Ik,min
     const ikMinWorstCase = Math.min(IkMin, IkMinFault);
     const fuseRating = parseFloat(mainBoardData.fuseRating.replace(",", "."));
-    const { curvePoints, InCurve } = getFuseData("Standard", mainBoardData.fuseType, fuseRating);
-    const useAbsoluteIk = mainBoardData.fuseType === "Diazed gG" || 
-                          mainBoardData.fuseType === "Diazed D2/D3/D4" ||
-                          mainBoardData.fuseType === "Neozed gG" || 
-                          mainBoardData.fuseType === "Knivsikring gG" ||
-                          mainBoardData.fuseType === "Knivsikring NH00" ||
-                          mainBoardData.fuseType === "Knivsikring NH0" ||
-                          mainBoardData.fuseType === "Knivsikring NH1";
-    const { time: tripTime } = fuseTripTimeExplain(InCurve, ikMinWorstCase, curvePoints, useAbsoluteIk);
-    // Use correct k-value based on material: Cu=143, Al=94
-    const kValue = mainBoardData.material === "Cu" ? 143 : 94;
-    const thermalResult = thermalOk(kValue, chosenSize, ikMinWorstCase, tripTime);
-    const isThermalOk = thermalResult.ok;
+
+    // Check if fuse size is available
+    const fuseSizeAvailable = isFuseSizeAvailable("Standard", mainBoardData.fuseType, fuseRating);
+    let tripTime = 0;
+    let isThermalOk = false;
+    let fuseUnavailableWarning = "";
+
+    if (!fuseSizeAvailable) {
+      const availableSizes = getAvailableFuseSizes("Standard", mainBoardData.fuseType);
+      fuseUnavailableWarning = `⚠️ ${mainBoardData.fuseType} sikring ${fuseRating.toFixed(0)} A findes ikke i tabelerne.\n\nTilgængelige størrelser: ${availableSizes.join(", ")} A\n\nVælg venligst en tilgængelig størrelse eller en anden sikringstype.`;
+    } else {
+      const { curvePoints, InCurve } = getFuseData("Standard", mainBoardData.fuseType, fuseRating);
+      const useAbsoluteIk = mainBoardData.fuseType === "Diazed gG" ||
+                            mainBoardData.fuseType === "Diazed D2/D3/D4" ||
+                            mainBoardData.fuseType === "Neozed gG" ||
+                            mainBoardData.fuseType === "Knivsikring gG" ||
+                            mainBoardData.fuseType === "Knivsikring NH00" ||
+                            mainBoardData.fuseType === "Knivsikring NH0" ||
+                            mainBoardData.fuseType === "Knivsikring NH1";
+      const { time: calculatedTripTime } = fuseTripTimeExplain(InCurve, ikMinWorstCase, curvePoints, useAbsoluteIk);
+      tripTime = calculatedTripTime;
+
+      // Use correct k-value based on material: Cu=143, Al=94
+      const kValue = mainBoardData.material === "Cu" ? 143 : 94;
+      const thermalResult = thermalOk(kValue, chosenSize, ikMinWorstCase, tripTime);
+      isThermalOk = thermalResult.ok;
+    }
     
     // Warning if Ik,min at fault is significantly lower
     const faultWarning = nParallel > 1 && IkMinFault < IkMin * 0.8;
@@ -627,6 +642,7 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       thermalOk: isThermalOk,
       faultWarning,
       tripTime,
+      fuseUnavailableWarning,
     });
     
     // Add detailed logs to mellemregninger
@@ -983,6 +999,14 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                   </div>
                 </div>
               </div>
+            )}
+
+            {results.fuseUnavailableWarning && (
+              <Alert className="mt-6 border-red-500 bg-red-50 dark:bg-red-950/20">
+                <AlertDescription className="text-sm text-red-900 dark:text-red-100 whitespace-pre-line">
+                  {results.fuseUnavailableWarning}
+                </AlertDescription>
+              </Alert>
             )}
 
             {results.faultWarning && (
