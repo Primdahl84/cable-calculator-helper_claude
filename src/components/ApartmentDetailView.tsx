@@ -48,16 +48,6 @@ import {
 // Standard fuse sizes in amperes
 const STANDARD_FUSE_SIZES = [10, 13, 16, 20, 25, 32, 35, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630];
 
-// Function to select the next standard fuse size
-const selectNearestFuseSize = (current: number): number => {
-  for (const size of STANDARD_FUSE_SIZES) {
-    if (size >= current) {
-      return size;
-    }
-  }
-  return STANDARD_FUSE_SIZES[STANDARD_FUSE_SIZES.length - 1];
-};
-
 type DimensioningMethod = "manual" | "area" | "velander";
 type PhaseSystem = "1-faset" | "3-faset";
 type Material = "Cu" | "Al";
@@ -789,14 +779,12 @@ export function ApartmentDetailView({
         }
 
         const activeSegments = group.segments.filter((s) => s.length > 0);
-        const totalLength = activeSegments.reduce((sum, s) => sum + s.length, 0);
 
         if (activeSegments.length === 0) {
           return group;
         }
 
         let newGroup = group;
-        let chosenSq = 0;
         let totalVoltageDropPercent = 0;
 
         if (group.autoSize) {
@@ -820,7 +808,6 @@ export function ApartmentDetailView({
           );
 
           if (result.chosenSize) {
-            chosenSq = result.chosenSize;
             totalVoltageDropPercent = result.totalVoltageDropPercent;
 
             const segments = group.segments.map((seg) =>

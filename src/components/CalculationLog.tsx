@@ -241,19 +241,16 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
                 const groupedByServiceCable = groupLogs.reduce((acc, log) => {
                   let serviceCable = "Individuelle stikledninger";
                   let apartmentName = "Andre";
-                  let groupeName = log.title;
 
                   if (log.title.includes("||")) {
                     const parts = log.title.split("||");
                     serviceCable = parts[0];
                     apartmentName = parts[1];
-                    groupeName = parts[2];
                   } else {
                     // Fallback to old format
                     const apartmentMatch = log.title.match(/^(.*?)\s*-\s*Gruppe/);
                     if (apartmentMatch) {
                       apartmentName = apartmentMatch[1];
-                      groupeName = `Gruppe ${log.title.split(" - Gruppe ")[1]}`;
                     }
                   }
 
