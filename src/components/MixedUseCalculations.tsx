@@ -57,6 +57,7 @@ interface GroupData {
   name: string;
   In: string;
   fuseType: string;
+  fuseRating: string;
   phase: "1-faset" | "3-faset";
   selectedPhase?: "L1" | "L2" | "L3";
   material: "Cu" | "Al";
@@ -133,6 +134,7 @@ const createDefaultGroup = (index: number, autoPhase?: "L1" | "L2" | "L3"): Grou
   name: `G${index + 1}`,
   In: "10",
   fuseType: "MCB B",
+  fuseRating: "10",
   phase: "1-faset",
   selectedPhase: autoPhase || "L2",
   material: "Cu",

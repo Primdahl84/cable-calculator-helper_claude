@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Plus, Trash2, Edit2, Calculator } from "lucide-react";
@@ -12,8 +12,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { toast } from "sonner";
 import { SegmentInput } from "./SegmentInput";
 import type { SegmentData } from "@/lib/calculations";
-import { 
-  lookupIz, 
+import {
+  lookupIz,
   voltageDropDs,
   getCableImpedancePerKm,
   ikMinStik,
@@ -147,7 +147,6 @@ const createDefaultGroup = (index: number, autoPhase?: "L1" | "L2" | "L3"): Grou
   KjJord: "1.0",
   autoSize: true,
   segments: [createDefaultSegment()],
-  mainFuseIn: "35",
 });
 
 export function ApartmentDetailView({ 
@@ -167,7 +166,19 @@ export function ApartmentDetailView({
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedCable, setSelectedCable] = useState<{id: string; name: string} | null>(null);
   const [editName, setEditName] = useState("");
-  
+
+  // Track last calculated group data to prevent redundant recalculations
+  const lastGroupDataRef = useRef<string>("");
+
+  // Group results state - map of group ID to results
+  const [groupResults, setGroupResults] = useState<Record<string, {
+    chosenSize: number | null;
+    totalVoltageDrop: number;
+    voltageDropPercent: number;
+    overloadOk: boolean;
+    voltageDropOk: boolean;
+  }>>({});
+
   // Service cable state
   const [serviceCableResults, setServiceCableResults] = useState<{
     chosenSize: number | null;
@@ -762,6 +773,13 @@ export function ApartmentDetailView({
   const calculateApartmentGroups = () => {
     try {
       const allSteps: CalculationStep[][] = [];
+      const newGroupResults: Record<string, {
+        chosenSize: number | null;
+        totalVoltageDrop: number;
+        voltageDropPercent: number;
+        overloadOk: boolean;
+        voltageDropOk: boolean;
+      }> = {};
 
       const updatedGroups: GroupData[] = apartment.groups.map((group, idx) => {
         const steps: CalculationStep[] = [];
@@ -775,17 +793,22 @@ export function ApartmentDetailView({
         const KjJord = parseFloat(group.KjJord.replace(",", ".") || "1.0");
 
         if (![In, cos, duMax, KjJord].every((v) => isFinite(v))) {
+          console.warn(`Group ${group.name}: Invalid numeric values - In=${In}, cos=${cos}, duMax=${duMax}, KjJord=${KjJord}`);
           return group;
         }
 
         const activeSegments = group.segments.filter((s) => s.length > 0);
 
         if (activeSegments.length === 0) {
+          console.warn(`Group ${group.name}: No active segments`);
           return group;
         }
 
         let newGroup = group;
         let totalVoltageDropPercent = 0;
+        let chosenSize: number | null = null;
+        let overloadOk = false;
+        let totalVoltageDrop = 0;
 
         if (group.autoSize) {
           const segInputs = activeSegments.map((s) => ({
@@ -809,6 +832,7 @@ export function ApartmentDetailView({
 
           if (result.chosenSize) {
             totalVoltageDropPercent = result.totalVoltageDropPercent;
+            chosenSize = result.chosenSize;
 
             const segments = group.segments.map((seg) =>
               seg.length > 0 ? { ...seg, crossSection: result.chosenSize } : seg,
@@ -826,12 +850,14 @@ export function ApartmentDetailView({
             });
 
             // Detaljeret Iz-kontrol for hvert segment
+            let minIzCorr = Infinity;
             for (let i = 0; i < activeSegments.length; i++) {
               const seg = activeSegments[i];
               const iz = lookupIz(group.material, seg.installMethod, result.chosenSize, seg.loadedConductors, seg.insulationType || "XLPE");
               const env = seg.installMethod.startsWith("D") ? "jord" : "luft";
               const Kj = env === "jord" ? KjJord : 1.0;
               const IzCorr = iz * seg.kt * Kj * seg.kgrp;
+              minIzCorr = Math.min(minIzCorr, IzCorr);
 
               steps.push({
                 category: 'overbelastning',
@@ -841,6 +867,7 @@ export function ApartmentDetailView({
                 result: `Iz,korr = ${IzCorr.toFixed(1)} A\n${In <= IzCorr ? '✓' : '✗'} In ≤ Iz,korr (${In.toFixed(1)} A ≤ ${IzCorr.toFixed(1)} A)`
               });
             }
+            overloadOk = In <= minIzCorr;
 
             // Detaljeret spændingsfaldsberegning
             let duTotalCalc = 0;
@@ -859,6 +886,7 @@ export function ApartmentDetailView({
                 result: `ΔU = ${du.toFixed(2)} V (${duPercent.toFixed(2)}%)`
               });
             }
+            totalVoltageDrop = duTotalCalc;
 
             steps.push({
               category: 'spændingsfald',
@@ -867,12 +895,76 @@ export function ApartmentDetailView({
               calculation: `ΔU_total = ${duSegments.length > 1 ? 'Σ ΔU_segmenter' : 'ΔU_segment1'}`,
               result: `ΔU_total = ${duTotalCalc.toFixed(2)} V (${totalVoltageDropPercent.toFixed(2)}%)\n${totalVoltageDropPercent <= duMax ? '✓' : '✗'} ΔU ≤ ${duMax.toFixed(2)}%`
             });
+
+            // Kortslutningsbeskyttelse - Calculate cable impedance
+            try {
+              let totalR = 0;
+              let totalX = 0;
+
+              // Sum impedance for all segments
+              for (let i = 0; i < activeSegments.length; i++) {
+                const seg = activeSegments[i];
+                const impedance = getCableImpedancePerKm(group.material, result.chosenSize, seg.loadedConductors, group.phase);
+                totalR += (impedance.R * seg.length) / 1000;
+                totalX += (impedance.X * seg.length) / 1000;
+              }
+
+              const kValue = group.material === "Cu" ? 143 : 94;
+
+              // Calculate minimum short circuit current at the group
+              const Zkabel = Math.sqrt(totalR ** 2 + totalX ** 2);
+              const IkMin = (Uv / (Math.sqrt(3) * Zkabel)) * 1000;
+
+              steps.push({
+                category: 'kortslutning',
+                formula: "Kortslutningsimpedans – gruppe",
+                variables: `Material = ${group.material}\nTværsnit = ${result.chosenSize.toFixed(1)} mm²\nTotal længde = ${activeSegments.reduce((sum, s) => sum + s.length, 0).toFixed(1)} m\nFase = ${group.phase}`,
+                calculation: `Z = √(R² + X²)\nR_total = ${totalR.toFixed(5)} Ω\nX_total = ${totalX.toFixed(5)} Ω`,
+                result: `|Z_gruppe| = ${Zkabel.toFixed(5)} Ω`
+              });
+
+              steps.push({
+                category: 'kortslutning',
+                formula: "Minimum kortslutningsstrøm",
+                variables: `U = ${Uv} V\n|Z_gruppe| = ${Zkabel.toFixed(5)} Ω`,
+                calculation: `Ik,min = U / (√3 × |Z|) × 1000\nIk,min = ${Uv} / (1.732 × ${Zkabel.toFixed(5)}) × 1000`,
+                result: `Ik,min = ${IkMin.toFixed(1)} A`
+              });
+
+              // Thermal protection check if we have group fuse data
+              if (group.fuseType && group.In) {
+                const fuseCurrent = parseFloat(group.In.replace(",", "."));
+                const fuseSizeName = `${group.fuseType} ${fuseCurrent.toFixed(0)} A`;
+
+                steps.push({
+                category: 'kortslutning',
+                formula: "Kortslutningsbeskyttelse",
+                variables: `Sikring = ${fuseSizeName}\nIk,min = ${IkMin.toFixed(1)} A\nMaterial = ${group.material}\nTværsnit = ${result.chosenSize.toFixed(1)} mm²`,
+                calculation: `Termisk kontrol: I²t ≤ k²S²\nIk,min² × t_udbrydelses ≤ (${kValue})² × (${result.chosenSize.toFixed(1)})²\n${IkMin.toFixed(1)}² × t ≤ ${(kValue * result.chosenSize).toFixed(0)}`,
+                result: `Kortslutningsstrøm OK hvis sikring frigør indenfor fastsatte grænser`
+              });
+              }
+            } catch (error) {
+              console.warn(`Group ${group.name}: Short circuit calculation failed - ${error}`);
+            }
           }
         }
+
+        // Store results for this group
+        newGroupResults[group.id] = {
+          chosenSize,
+          totalVoltageDrop,
+          voltageDropPercent: totalVoltageDropPercent,
+          overloadOk,
+          voltageDropOk: totalVoltageDropPercent <= duMax
+        };
 
         allSteps.push(steps);
         return newGroup;
       });
+
+      // Update group results state
+      setGroupResults(newGroupResults);
 
       // Log calculations
       for (let idx = 0; idx < updatedGroups.length; idx++) {
@@ -909,7 +1001,28 @@ export function ApartmentDetailView({
   // Auto-calculate groups when they change
   useEffect(() => {
     if (apartment.groups && apartment.groups.length > 0 && serviceCableResults) {
-      calculateApartmentGroups();
+      // Create hash of only the calculation-relevant data (not names)
+      const groupDataHash = JSON.stringify(
+        apartment.groups.map(g => ({
+          id: g.id,
+          phase: g.phase,
+          segments: g.segments.map(s => ({
+            length: s.length,
+            installMethod: s.installMethod,
+            ambientTemp: s.ambientTemp,
+            insulationType: s.insulationType,
+            loadedConductors: s.loadedConductors,
+            kt: s.kt,
+            kgrp: s.kgrp
+          }))
+        }))
+      );
+
+      // Only recalculate if calculation data actually changed
+      if (groupDataHash !== lastGroupDataRef.current) {
+        lastGroupDataRef.current = groupDataHash;
+        calculateApartmentGroups();
+      }
     }
   }, [
     apartment.groups,
@@ -1776,185 +1889,278 @@ export function ApartmentDetailView({
         </TabsContent>
 
         <TabsContent value="groups" className="space-y-4">
-          {apartment.groups.map((group) => (
-            <Card key={group.id}>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div className="space-y-2 flex-1">
-                    <CardTitle>{group.name}</CardTitle>
-                    <CardDescription>Beregn gruppe med automatisk tværsnitsvalg og spændingsfald.</CardDescription>
-                  </div>
-                  {apartment.groups.length > 1 && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => removeGroup(group.id)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                {/* Group Name */}
-                <div className="space-y-2">
-                  <Label>Gruppenavn</Label>
-                  <Input
-                    value={group.name}
-                    onChange={(e) => updateGroup(group.id, { name: e.target.value })}
-                    placeholder="f.eks. Køkken"
-                  />
-                </div>
-
-                {/* Group Settings */}
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="space-y-2">
-                    <Label>Sikringstype gruppe</Label>
-                    <Select
-                      value={group.fuseType}
-                      onValueChange={(v) => updateGroup(group.id, { fuseType: v })}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="MCB B">MCB B</SelectItem>
-                        <SelectItem value="MCB C">MCB C</SelectItem>
-                        <SelectItem value="MCB D">MCB D</SelectItem>
-                        <SelectItem value="gG">gG</SelectItem>
-                        <SelectItem value="aM">aM</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Sikrings størrelse gruppe [A]</Label>
-                    <Select
-                      value={group.In}
-                      onValueChange={(v) => updateGroup(group.id, { In: v })}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[6, 10, 13, 16, 20, 25, 32, 40, 50, 63].map(size => (
-                          <SelectItem key={size} value={size.toString()}>{size}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Fasesystem</Label>
-                    <Select
-                      value={group.phase}
-                      onValueChange={(v) => updateGroup(group.id, { phase: v as PhaseSystem })}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1-faset">1-faset</SelectItem>
-                        <SelectItem value="3-faset">3-faset</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="space-y-2">
-                    <Label>cos φ (gruppe)</Label>
-                    <Input
-                      value={group.cosPhi}
-                      onChange={(e) => updateGroup(group.id, { cosPhi: e.target.value })}
-                      placeholder="0.95"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Maks ΔU total [%]</Label>
-                    <Input
-                      value={group.maxVoltageDrop}
-                      onChange={(e) => updateGroup(group.id, { maxVoltageDrop: e.target.value })}
-                      placeholder="3"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Kj (jordtemp.-faktor)</Label>
-                    <Input
-                      value={group.KjJord}
-                      onChange={(e) => updateGroup(group.id, { KjJord: e.target.value })}
-                      placeholder="1"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Materiale</Label>
-                  <Select
-                    value={group.material}
-                    onValueChange={(v) => updateGroup(group.id, { material: v as Material })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Cu">Kobber (Cu)</SelectItem>
-                      <SelectItem value="Al">Aluminium (Al)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Auto tværsnit</Label>
-                  <Select
-                    value={group.autoSize ? "Ja (auto)" : "Nej (manuel)"}
-                    onValueChange={(v) => updateGroup(group.id, { autoSize: v === "Ja (auto)" })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Ja (auto)">Ja (auto)</SelectItem>
-                      <SelectItem value="Nej (manuel)">Nej (manuel)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* Segments */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-base font-semibold">Kabel fremføringmetode</Label>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => addSegmentToGroup(group.id)}
-                    >
-                      <Plus className="h-3 w-3 mr-1" />
-                      Segment af kabel
-                    </Button>
-                  </div>
-                  {group.segments.map((seg, segIdx) => (
-                    <div key={segIdx} className="relative mt-2">
-                      <SegmentInput
-                        segment={seg}
-                        onChange={(data) => updateGroupSegment(group.id, segIdx, data)}
-                      />
-                      {group.segments.length > 1 && (
+          {apartment.groups.length > 0 ? (
+            <>
+              <Tabs defaultValue={apartment.groups[0]?.id} className="w-full">
+                <TabsList className="w-full justify-start overflow-x-auto">
+                  {apartment.groups.map((group) => (
+                    <div key={group.id} className="relative">
+                      <TabsTrigger value={group.id} className="pr-8">
+                        {group.name}
+                      </TabsTrigger>
+                      {apartment.groups.length > 1 && (
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="absolute top-2 right-2"
-                          onClick={() => removeSegmentFromGroup(group.id, segIdx)}
+                          className="absolute right-0 top-1/2 -translate-y-1/2 h-6 w-6"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            removeGroup(group.id);
+                          }}
                         >
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       )}
                     </div>
                   ))}
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </TabsList>
 
-          {apartment.groups.length === 0 && (
+                {apartment.groups.map((group) => (
+                  <TabsContent key={group.id} value={group.id} className="space-y-4">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>{group.name}</CardTitle>
+                        <CardDescription>Beregn gruppe med automatisk tværsnitsvalg og spændingsfald.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-6">
+                        {/* Group Name */}
+                        <div className="space-y-2">
+                          <Label>Gruppenavn</Label>
+                          <Input
+                            value={group.name}
+                            onChange={(e) => updateGroup(group.id, { name: e.target.value })}
+                            placeholder="f.eks. Køkken"
+                          />
+                        </div>
+
+                        {/* Group Settings */}
+                        <div className="grid grid-cols-3 gap-4">
+                          <div className="space-y-2">
+                            <Label>Sikringstype gruppe</Label>
+                            <Select
+                              value={group.fuseType}
+                              onValueChange={(v) => updateGroup(group.id, { fuseType: v })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="MCB B">MCB B</SelectItem>
+                                <SelectItem value="MCB C">MCB C</SelectItem>
+                                <SelectItem value="MCB D">MCB D</SelectItem>
+                                <SelectItem value="gG">gG</SelectItem>
+                                <SelectItem value="aM">aM</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Sikrings størrelse gruppe [A]</Label>
+                            <Select
+                              value={group.In}
+                              onValueChange={(v) => updateGroup(group.id, { In: v })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {[6, 10, 13, 16, 20, 25, 32, 40, 50, 63].map(size => (
+                                  <SelectItem key={size} value={size.toString()}>{size}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Fasesystem</Label>
+                            <Select
+                              value={group.phase}
+                              onValueChange={(v) => updateGroup(group.id, { phase: v as PhaseSystem })}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="1-faset">1-faset</SelectItem>
+                                <SelectItem value="3-faset">3-faset</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-4">
+                          <div className="space-y-2">
+                            <Label>cos φ (gruppe)</Label>
+                            <Input
+                              value={group.cosPhi}
+                              onChange={(e) => updateGroup(group.id, { cosPhi: e.target.value })}
+                              placeholder="0.95"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Maks ΔU total [%]</Label>
+                            <Input
+                              value={group.maxVoltageDrop}
+                              onChange={(e) => updateGroup(group.id, { maxVoltageDrop: e.target.value })}
+                              placeholder="3"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Kj (jordtemp.-faktor)</Label>
+                            <Input
+                              value={group.KjJord}
+                              onChange={(e) => updateGroup(group.id, { KjJord: e.target.value })}
+                              placeholder="1"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Materiale</Label>
+                          <Select
+                            value={group.material}
+                            onValueChange={(v) => updateGroup(group.id, { material: v as Material })}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="Cu">Kobber (Cu)</SelectItem>
+                              <SelectItem value="Al">Aluminium (Al)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Auto tværsnit</Label>
+                          <Select
+                            value={group.autoSize ? "Ja (auto)" : "Nej (manuel)"}
+                            onValueChange={(v) => updateGroup(group.id, { autoSize: v === "Ja (auto)" })}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="Ja (auto)">Ja (auto)</SelectItem>
+                              <SelectItem value="Nej (manuel)">Nej (manuel)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {/* Segments */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-base font-semibold">Kabel fremføringmetode</Label>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => addSegmentToGroup(group.id)}
+                            >
+                              <Plus className="h-3 w-3 mr-1" />
+                              Segment af kabel
+                            </Button>
+                          </div>
+                          {group.segments.map((seg, segIdx) => (
+                            <div key={segIdx} className="relative mt-2">
+                              <SegmentInput
+                                segment={seg}
+                                onChange={(data) => updateGroupSegment(group.id, segIdx, data)}
+                              />
+                              {group.segments.length > 1 && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="absolute top-2 right-2"
+                                  onClick={() => removeSegmentFromGroup(group.id, segIdx)}
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    {/* Group Results */}
+                    {groupResults[group.id]?.chosenSize && (
+                      <Card className="border-2 border-primary">
+                        <CardHeader>
+                          <CardTitle>Resultater – {group.name}</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="grid grid-cols-3 gap-8">
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Sikringsstørrelse:</div>
+                              <div className="text-xl font-bold">{parseFloat(group.In).toFixed(1)} A</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Kabeltværsnit:</div>
+                              <div className="text-xl font-bold">{groupResults[group.id].chosenSize.toFixed(1)} mm²</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Spændingsfald:</div>
+                              <div className="text-xl font-bold">
+                                {groupResults[group.id].totalVoltageDrop.toFixed(2)} V ({groupResults[group.id].voltageDropPercent.toFixed(2)} %)
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-8 mt-6">
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Overbelastning:</div>
+                              <div className="text-xl font-bold">
+                                {groupResults[group.id].overloadOk ? '✓ OK' : '✗ Ikke OK'}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Spændingsfaldskontrol:</div>
+                              <div className="text-xl font-bold">
+                                {groupResults[group.id].voltageDropOk ? '✓ OK' : '✗ For høj'}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4">
+                            <div className="text-xs text-muted-foreground mb-2">Status:</div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {groupResults[group.id].voltageDropOk ? (
+                                <Badge variant="default" className="bg-green-600">
+                                  ✓ Spændingsfald OK
+                                </Badge>
+                              ) : (
+                                <Badge variant="destructive">
+                                  ✗ Spændingsfald for høj
+                                </Badge>
+                              )}
+                              {groupResults[group.id].overloadOk ? (
+                                <Badge variant="default" className="bg-green-600">
+                                  ✓ Overbelastning OK
+                                </Badge>
+                              ) : (
+                                <Badge variant="destructive">
+                                  ✗ Overbelastning problem
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </TabsContent>
+                ))}
+              </Tabs>
+
+              {/* Add New Group Button */}
+              <Card>
+                <CardHeader>
+                  <Button onClick={addGroup} size="sm">
+                    <Plus className="h-4 w-4 mr-2" />
+                    Ny gruppe
+                  </Button>
+                </CardHeader>
+              </Card>
+            </>
+          ) : (
             <Card>
               <CardHeader>
                 <CardTitle>Grupper</CardTitle>
@@ -1969,17 +2175,6 @@ export function ApartmentDetailView({
                   </Button>
                 </div>
               </CardContent>
-            </Card>
-          )}
-
-          {apartment.groups.length > 0 && (
-            <Card>
-              <CardHeader>
-                <Button onClick={addGroup} size="sm">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Ny gruppe
-                </Button>
-              </CardHeader>
             </Card>
           )}
         </TabsContent>

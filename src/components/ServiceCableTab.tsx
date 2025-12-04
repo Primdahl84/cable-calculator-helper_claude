@@ -16,6 +16,10 @@ import {
   thermalOk,
   STANDARD_SIZES,
   formatCurrentWithAngle,
+  calculateTransformerImpedance,
+  calculateReducedNeutral,
+  calculateNetworkImpedance,
+  addComplexCurrents,
 } from "@/lib/calculations";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -189,7 +193,73 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     return "auto";
   });
 
-  // Trafo-indstillinger
+  // Trafo-parametre for automatisk impedans beregning
+  const [trafoMode, setTrafoMode] = useState<"automatic" | "manual">(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.trafoMode || "manual";
+      } catch {
+        return "manual";
+      }
+    }
+    return "manual";
+  });
+
+  const [S_trafo, setS_trafo] = useState(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.S_trafo || "400000";
+      } catch {
+        return "400000";
+      }
+    }
+    return "400000";
+  });
+
+  const [U_trafo, setU_trafo] = useState(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.U_trafo || "420";
+      } catch {
+        return "420";
+      }
+    }
+    return "420";
+  });
+
+  const [Ek_percent, setEk_percent] = useState(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.Ek_percent || "3.5";
+      } catch {
+        return "3.5";
+      }
+    }
+    return "3.5";
+  });
+
+  const [P_cu, setP_cu] = useState(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.P_cu || "3200";
+      } catch {
+        return "3200";
+      }
+    }
+    return "3200";
+  });
+
+  // Trafo-indstillinger (beregnet eller manual)
   const [ikTrafo, setIkTrafo] = useState(() => {
     const saved = localStorage.getItem(storageKey);
     if (saved) {
@@ -328,6 +398,11 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
       tripTime,
       fuseManufacturer,
       segments,
+      trafoMode,
+      S_trafo,
+      U_trafo,
+      Ek_percent,
+      P_cu,
     };
     localStorage.setItem(storageKey, JSON.stringify(state));
   }, [
@@ -346,6 +421,11 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     tripTime,
     fuseManufacturer,
     segments,
+    trafoMode,
+    S_trafo,
+    U_trafo,
+    Ek_percent,
+    P_cu,
   ]);
 
   // Auto-update k-value when material changes
@@ -371,6 +451,7 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
 
   const prevInputsRef = useRef<string>('');
   const hasCalculatedOnceRef = useRef(false);
+  const isFirstAutomaticModeRef = useRef(true);
 
   // Auto-calculate when inputs change (with debounce)
   useEffect(() => {
@@ -468,6 +549,52 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
       localStorage.setItem(`${storageKey}-results`, JSON.stringify(resultsState));
     }
   }, [results, ikTrafo, cosTrafo, storageKey]);
+
+  // Reset to standard values when switching to automatic mode
+  useEffect(() => {
+    if (trafoMode === "automatic" && isFirstAutomaticModeRef.current) {
+      setIkTrafo("16000");
+      setCosTrafo("0.3");
+      isFirstAutomaticModeRef.current = false;
+    } else if (trafoMode === "manual") {
+      isFirstAutomaticModeRef.current = true;
+    }
+  }, [trafoMode]);
+
+  // Auto-calculate transformer impedance when in automatic mode
+  useEffect(() => {
+    if (trafoMode === "automatic") {
+      try {
+        const S_trafo_num = parseFloat(S_trafo.replace(",", "."));
+        const U_trafo_num = parseFloat(U_trafo.replace(",", "."));
+        const Ek_percent_num = parseFloat(Ek_percent.replace(",", "."));
+        const P_cu_num = parseFloat(P_cu.replace(",", "."));
+
+        if (S_trafo_num > 0 && U_trafo_num > 0 && Ek_percent_num > 0) {
+          const trafoImpedance = calculateTransformerImpedance(
+            S_trafo_num,
+            U_trafo_num,
+            Ek_percent_num,
+            P_cu_num
+          );
+
+          // Calculate Ik from impedance: Ik = U / Z
+          const IkTrafo_calculated = (U_trafo_num / trafoImpedance.Z).toFixed(0);
+          setIkTrafo(IkTrafo_calculated);
+          setCosTrafo(trafoImpedance.cos_phi.toFixed(3));
+
+          // Show calculation info
+          console.log("Transformer impedance calculated:", {
+            Z: trafoImpedance.Z.toFixed(5),
+            cos_phi: trafoImpedance.cos_phi.toFixed(3),
+            Ik: IkTrafo_calculated,
+          });
+        }
+      } catch (error) {
+        console.error("Transformer impedance calculation failed:", error);
+      }
+    }
+  }, [trafoMode, S_trafo, U_trafo, Ek_percent, P_cu]);
 
   const addSegment = () => {
     setSegments((prev) => [
@@ -1002,26 +1129,93 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
                 }}
               />
             </div>
-            
+
+            {/* Transformer Mode Selection */}
             <div className="space-y-1">
-              <Label>Ikmax Trafo [A]</Label>
-              <Input
-                type="number"
-                value={ikTrafo}
-                onChange={(e) => setIkTrafo(e.target.value)}
-              />
+              <Label>Transformer Beregning</Label>
+              <Select value={trafoMode} onValueChange={(v: "automatic" | "manual") => setTrafoMode(v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">Manuel Ik & cos φ</SelectItem>
+                  <SelectItem value="automatic">Automatisk fra Ek%, S, U, P_cu</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
-            
-            <div className="space-y-1">
-              <Label>cos φ trafo</Label>
-              <Input
-                type="number"
-                step="0.01"
-                value={cosTrafo}
-                onChange={(e) => setCosTrafo(e.target.value)}
-              />
-            </div>
-            
+
+            {/* Automatic Transformer Calculation */}
+            {trafoMode === "automatic" && (
+              <>
+                <div className="space-y-1">
+                  <Label>Transformer Effekt [VA]</Label>
+                  <Input
+                    type="number"
+                    value={S_trafo}
+                    onChange={(e) => setS_trafo(e.target.value)}
+                    placeholder="400000"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>Transformer Spænding [V]</Label>
+                  <Input
+                    type="number"
+                    value={U_trafo}
+                    onChange={(e) => setU_trafo(e.target.value)}
+                    placeholder="420"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>Impedans Ek% [%]</Label>
+                  <Input
+                    type="number"
+                    step="0.1"
+                    value={Ek_percent}
+                    onChange={(e) => setEk_percent(e.target.value)}
+                    placeholder="3.5"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>Kobber tab P_cu [W]</Label>
+                  <Input
+                    type="number"
+                    value={P_cu}
+                    onChange={(e) => setP_cu(e.target.value)}
+                    placeholder="3200"
+                  />
+                </div>
+                <div className="rounded-lg bg-muted p-3 text-sm">
+                  <p className="font-semibold mb-1">Beregnet fra transformer data:</p>
+                  <p>Ikmax Trafo: {ikTrafo} A</p>
+                  <p>cos φ trafo: {cosTrafo}</p>
+                </div>
+              </>
+            )}
+
+            {/* Manual Transformer Input */}
+            {trafoMode === "manual" && (
+              <>
+                <div className="space-y-1">
+                  <Label>Ikmax Trafo [A]</Label>
+                  <Input
+                    type="number"
+                    value={ikTrafo}
+                    onChange={(e) => setIkTrafo(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <Label>cos φ trafo</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={cosTrafo}
+                    onChange={(e) => setCosTrafo(e.target.value)}
+                  />
+                </div>
+              </>
+            )}
+
             <div className="space-y-1">
               <Label htmlFor="autoSize2">Auto tværsnit</Label>
               <Select value={autoSize} onValueChange={(val: "auto" | "manual") => setAutoSize(val)}>

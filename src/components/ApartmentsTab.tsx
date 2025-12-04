@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Trash2, Building2, Calculator, Check, Edit2 } from "lucide-react";
+import { Plus, Trash2, Building2, Calculator, Check, Edit2, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { 
@@ -125,6 +125,9 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
   const { currentProject } = useProject();
   const projectId = currentProject?.id || 'default';
   const storageKey = `apartments-tab-state-${projectId}`;
+
+  // For residential-only projects (lejlighed), restrict to residential units only
+  const allowCommercialUnits = currentProject?.type !== "lejlighed";
   
   const [selectedApartmentId, setSelectedApartmentId] = useState<string | null>(null);
   
@@ -362,6 +365,23 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
       return;
     }
     setApartments((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const copyApartment = (apartmentToCopy: any) => {
+    // Create a deep copy of the apartment with new ID and name
+    const newApartment = {
+      ...apartmentToCopy,
+      id: `apt-${Date.now()}`,
+      name: `${apartmentToCopy.name} kopi`,
+      groups: apartmentToCopy.groups.map((group: any) => ({
+        ...group,
+        id: `group-${Date.now()}-${Math.random()}`,
+        segments: group.segments.map((seg: any) => ({ ...seg }))
+      }))
+    };
+
+    setApartments((prev) => [...prev, newApartment]);
+    toast.success(`Lejlighed "${apartmentToCopy.name}" kopieret`);
   };
 
   // Calculate shared service cable with detailed logs
@@ -891,15 +911,21 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
                 </span>
               </CardTitle>
               <div className="flex items-center gap-4 pt-4">
-                <Select value={newUnitType} onValueChange={(v: "residential" | "commercial") => setNewUnitType(v)}>
-                  <SelectTrigger className="w-[180px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="residential">Bolig</SelectItem>
-                    <SelectItem value="commercial">Erhverv</SelectItem>
-                  </SelectContent>
-                </Select>
+                {allowCommercialUnits && (
+                  <Select value={newUnitType} onValueChange={(v: "residential" | "commercial") => {
+                    if (allowCommercialUnits || v === "residential") {
+                      setNewUnitType(v);
+                    }
+                  }}>
+                    <SelectTrigger className="w-[180px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="residential">Bolig</SelectItem>
+                      {allowCommercialUnits && <SelectItem value="commercial">Erhverv</SelectItem>}
+                    </SelectContent>
+                  </Select>
+                )}
                 <Button onClick={addApartment} size="sm">
                   <Plus className="h-4 w-4 mr-2" />
                   Ny enhed
@@ -938,22 +964,35 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
                                     )}
                                     {apt.name}
                                   </span>
-                                  {apartments.length > 1 && (
+                                  <div className="ml-auto flex items-center gap-1">
                                     <button
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (selectedApartment?.id === apt.id && apartments.length > 1) {
-                                          const currentIndex = apartments.findIndex(a => a.id === apt.id);
-                                          const nextApt = apartments[currentIndex === 0 ? 1 : currentIndex - 1];
-                                          setSelectedApartmentId(nextApt.id);
-                                        }
-                                        removeApartment(apt.id);
+                                        copyApartment(apt);
                                       }}
-                                      className="ml-auto hover:text-destructive"
+                                      className="hover:text-primary"
+                                      title="Kopier lejlighed"
                                     >
-                                      <Trash2 className="h-3 w-3" />
+                                      <Copy className="h-3 w-3" />
                                     </button>
-                                  )}
+                                    {apartments.length > 1 && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (selectedApartment?.id === apt.id && apartments.length > 1) {
+                                            const currentIndex = apartments.findIndex(a => a.id === apt.id);
+                                            const nextApt = apartments[currentIndex === 0 ? 1 : currentIndex - 1];
+                                            setSelectedApartmentId(nextApt.id);
+                                          }
+                                          removeApartment(apt.id);
+                                        }}
+                                        className="hover:text-destructive"
+                                        title="Slet lejlighed"
+                                      >
+                                        <Trash2 className="h-3 w-3" />
+                                      </button>
+                                    )}
+                                  </div>
                                 </Button>
                               ))}
                             </div>
@@ -986,22 +1025,35 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
                               <Badge variant="outline" className="text-xs px-1 py-0">IND</Badge>
                               {apt.name}
                             </span>
-                            {apartments.length > 1 && (
+                            <div className="ml-auto flex items-center gap-1">
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (selectedApartment?.id === apt.id && apartments.length > 1) {
-                                    const currentIndex = apartments.findIndex(a => a.id === apt.id);
-                                    const nextApt = apartments[currentIndex === 0 ? 1 : currentIndex - 1];
-                                    setSelectedApartmentId(nextApt.id);
-                                  }
-                                  removeApartment(apt.id);
+                                  copyApartment(apt);
                                 }}
-                                className="ml-auto hover:text-destructive"
+                                className="hover:text-primary"
+                                title="Kopier lejlighed"
                               >
-                                <Trash2 className="h-3 w-3" />
+                                <Copy className="h-3 w-3" />
                               </button>
-                            )}
+                              {apartments.length > 1 && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (selectedApartment?.id === apt.id && apartments.length > 1) {
+                                      const currentIndex = apartments.findIndex(a => a.id === apt.id);
+                                      const nextApt = apartments[currentIndex === 0 ? 1 : currentIndex - 1];
+                                      setSelectedApartmentId(nextApt.id);
+                                    }
+                                    removeApartment(apt.id);
+                                  }}
+                                  className="hover:text-destructive"
+                                  title="Slet lejlighed"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              )}
+                            </div>
                           </Button>
                         ))}
                       </div>
@@ -1296,15 +1348,21 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
                 </CardDescription>
               </div>
               <div className="flex items-center gap-2">
-                <Select value={newUnitType} onValueChange={(v) => setNewUnitType(v as "residential" | "commercial")}>
-                  <SelectTrigger className="w-[140px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="residential">Bolig</SelectItem>
-                    <SelectItem value="commercial">Erhverv</SelectItem>
-                  </SelectContent>
-                </Select>
+                {allowCommercialUnits && (
+                  <Select value={newUnitType} onValueChange={(v) => {
+                    if (allowCommercialUnits || v === "residential") {
+                      setNewUnitType(v as "residential" | "commercial");
+                    }
+                  }}>
+                    <SelectTrigger className="w-[140px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="residential">Bolig</SelectItem>
+                      {allowCommercialUnits && <SelectItem value="commercial">Erhverv</SelectItem>}
+                    </SelectContent>
+                  </Select>
+                )}
                 <Button onClick={addApartment} size="sm">
                   <Plus className="h-4 w-4 mr-2" />
                   Ny enhed
@@ -1336,22 +1394,35 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
                     )}
                     {apt.name}
                   </span>
-                  {apartments.length > 1 && (
+                  <div className="ml-auto flex items-center gap-1">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (selectedApartment?.id === apt.id && filteredApartments.length > 1) {
-                          const currentIndex = filteredApartments.findIndex(a => a.id === apt.id);
-                          const nextApt = filteredApartments[currentIndex === 0 ? 1 : currentIndex - 1];
-                          setSelectedApartmentId(nextApt.id);
-                        }
-                        removeApartment(apt.id);
+                        copyApartment(apt);
                       }}
-                      className="ml-2 hover:text-destructive"
+                      className="hover:text-primary"
+                      title="Kopier lejlighed"
                     >
-                      <Trash2 className="h-3 w-3" />
+                      <Copy className="h-3 w-3" />
                     </button>
-                  )}
+                    {apartments.length > 1 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (selectedApartment?.id === apt.id && filteredApartments.length > 1) {
+                            const currentIndex = filteredApartments.findIndex(a => a.id === apt.id);
+                            const nextApt = filteredApartments[currentIndex === 0 ? 1 : currentIndex - 1];
+                            setSelectedApartmentId(nextApt.id);
+                          }
+                          removeApartment(apt.id);
+                        }}
+                        className="hover:text-destructive"
+                        title="Slet lejlighed"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
                 </Button>
               ))}
             </div>

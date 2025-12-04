@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Calculator, Plus, Trash2 } from "lucide-react";
+import { Calculator, Plus, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { SegmentInput } from "./SegmentInput";
 import type { SegmentData } from "@/lib/calculations";
@@ -151,6 +151,9 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
           calculateMainBoard(false); // Auto calculation - don't show toast
         } catch (error) {
           console.error("Main board calculation error:", error);
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          toast.error(`Beregning fejl: ${errorMessage}`);
+          setResults(null);
         }
       }
     }
@@ -363,31 +366,46 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     const ikMinWorstCase = Math.min(IkMin, IkMinFault);
     const fuseRating = parseFloat(mainBoardData.fuseRating.replace(",", "."));
 
+    // Validate fuse rating
+    if (isNaN(fuseRating) || fuseRating <= 0) {
+      toast.error("Sikringsstørrelse skal være et tal større end 0");
+      return;
+    }
+
     // Check if fuse size is available
     const fuseSizeAvailable = isFuseSizeAvailable("Standard", mainBoardData.fuseType, fuseRating);
     let tripTime = 0;
     let isThermalOk = false;
     let fuseUnavailableWarning = "";
+    let InCurve = 0;
+    let kValue = 0;
 
     if (!fuseSizeAvailable) {
       const availableSizes = getAvailableFuseSizes("Standard", mainBoardData.fuseType);
       fuseUnavailableWarning = `⚠️ ${mainBoardData.fuseType} sikring ${fuseRating.toFixed(0)} A findes ikke i tabelerne.\n\nTilgængelige størrelser: ${availableSizes.join(", ")} A\n\nVælg venligst en tilgængelig størrelse eller en anden sikringstype.`;
     } else {
-      const { curvePoints, InCurve } = getFuseData("Standard", mainBoardData.fuseType, fuseRating);
-      const useAbsoluteIk = mainBoardData.fuseType === "Diazed gG" ||
-                            mainBoardData.fuseType === "Diazed D2/D3/D4" ||
-                            mainBoardData.fuseType === "Neozed gG" ||
-                            mainBoardData.fuseType === "Knivsikring gG" ||
-                            mainBoardData.fuseType === "Knivsikring NH00" ||
-                            mainBoardData.fuseType === "Knivsikring NH0" ||
-                            mainBoardData.fuseType === "Knivsikring NH1";
-      const { time: calculatedTripTime } = fuseTripTimeExplain(InCurve, ikMinWorstCase, curvePoints, useAbsoluteIk);
-      tripTime = calculatedTripTime;
+      try {
+        const { curvePoints, InCurve: InCurveValue } = getFuseData("Standard", mainBoardData.fuseType, fuseRating);
+        InCurve = InCurveValue;
 
-      // Use correct k-value based on material: Cu=143, Al=94
-      const kValue = mainBoardData.material === "Cu" ? 143 : 94;
-      const thermalResult = thermalOk(kValue, chosenSize, ikMinWorstCase, tripTime);
-      isThermalOk = thermalResult.ok;
+        const useAbsoluteIk = mainBoardData.fuseType === "Diazed gG" ||
+                              mainBoardData.fuseType === "Diazed D2/D3/D4" ||
+                              mainBoardData.fuseType === "Neozed gG" ||
+                              mainBoardData.fuseType === "Knivsikring gG" ||
+                              mainBoardData.fuseType === "Knivsikring NH00" ||
+                              mainBoardData.fuseType === "Knivsikring NH0" ||
+                              mainBoardData.fuseType === "Knivsikring NH1";
+        const { time: calculatedTripTime } = fuseTripTimeExplain(InCurve, ikMinWorstCase, curvePoints, useAbsoluteIk);
+        tripTime = calculatedTripTime;
+
+        // Use correct k-value based on material: Cu=143, Al=94
+        kValue = mainBoardData.material === "Cu" ? 143 : 94;
+        const thermalResult = thermalOk(kValue, chosenSize, ikMinWorstCase, tripTime);
+        isThermalOk = thermalResult.ok;
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Fejl ved sikringsberegning: ${errorMsg}`);
+      }
     }
     
     // Warning if Ik,min at fault is significantly lower
@@ -659,6 +677,17 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     }
   };
 
+  const handleCalculateMainBoard = () => {
+    try {
+      calculateMainBoard(true);
+    } catch (error) {
+      console.error("Main board calculation error:", error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast.error(`Beregning fejl: ${errorMessage}`);
+      setResults(null);
+    }
+  };
+
   const unitsInMainBoard = apartments.filter(apt => apt.includeInMainBoard !== false);
   const totalCurrent = calculateTotalCurrent();
 
@@ -741,6 +770,31 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                 </Select>
               </div>
             </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Materiale</Label>
+                <Select
+                  value={mainBoardData.material}
+                  onValueChange={(v) => setMainBoardData({ ...mainBoardData, material: v as "Cu" | "Al" })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Cu">Kobber (Cu)</SelectItem>
+                    <SelectItem value="Al">Aluminium (Al)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Maks. spændingsfald [%]</Label>
+                <Input
+                  value={mainBoardData.maxVoltageDrop}
+                  onChange={(e) => setMainBoardData({ ...mainBoardData, maxVoltageDrop: e.target.value })}
+                  placeholder="1.0"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Fuse Selection */}
@@ -763,7 +817,7 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                 </Select>
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Sikringstype</Label>
                 <Select
@@ -802,31 +856,8 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-2">
-                <Label>Materiale</Label>
-                <Select
-                  value={mainBoardData.material}
-                  onValueChange={(v) => setMainBoardData({ ...mainBoardData, material: v as "Cu" | "Al" })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Cu">Kobber (Cu)</SelectItem>
-                    <SelectItem value="Al">Aluminium (Al)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
             </div>
             <div className="space-y-4">
-              <div className="space-y-2">
-                <Label>Maks. spændingsfald [%]</Label>
-                <Input
-                  value={mainBoardData.maxVoltageDrop}
-                  onChange={(e) => setMainBoardData({ ...mainBoardData, maxVoltageDrop: e.target.value })}
-                  placeholder="1.0"
-                />
-              </div>
               
               {/* Parallel Cables Section - More Prominent */}
               <div className="p-4 border-2 border-primary/20 rounded-lg bg-primary/5 space-y-3">
@@ -897,20 +928,30 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
             ))}
           </div>
 
-          <Button onClick={calculateMainBoard} className="w-full" size="lg">
+          <Button onClick={handleCalculateMainBoard} className="w-full" size="lg">
             <Calculator className="mr-2 h-5 w-5" />
             Beregn hovedtavle
           </Button>
         </CardContent>
       </Card>
 
-      {/* Results - Only show full results if fuse size is available */}
-      {results && !results.fuseUnavailableWarning && (
+      {/* Results */}
+      {results && (
         <Card className="border-2 border-primary">
           <CardHeader>
             <CardTitle>Resultater – Hovedtavle</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-6">
+            {/* Fuse Unavailable Warning */}
+            {results.fuseUnavailableWarning && (
+              <Alert className="border-red-500 bg-red-50 dark:bg-red-950/20">
+                <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                <AlertDescription className="text-sm text-red-900 dark:text-red-100 whitespace-pre-line ml-2">
+                  {results.fuseUnavailableWarning}
+                </AlertDescription>
+              </Alert>
+            )}
+
             {/* Top Row: 3-column grid */}
             <div className="grid grid-cols-3 gap-8">
               <div>
@@ -1017,30 +1058,6 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                 </AlertDescription>
               </Alert>
             )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Fuse Unavailable Warning */}
-      {results?.fuseUnavailableWarning && (
-        <Card className="border-2 border-red-500 bg-red-50/50 dark:bg-red-950/20">
-          <CardHeader>
-            <CardTitle className="text-red-700 dark:text-red-300">Sikring ikke tilgængelig</CardTitle>
-            <CardDescription className="text-red-600 dark:text-red-400">
-              Den valgte sikringstype og størrelse findes ikke i tabelerne
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="text-sm text-red-900 dark:text-red-100 whitespace-pre-line font-medium">
-                {results.fuseUnavailableWarning}
-              </div>
-              <div className="pt-4 border-t border-red-200 dark:border-red-800">
-                <p className="text-sm text-red-800 dark:text-red-200">
-                  Venligst vælg en af de tilgængelige størrelser eller skift til en anden sikringstype for at fortsætte beregningen.
-                </p>
-              </div>
-            </div>
           </CardContent>
         </Card>
       )}
