@@ -55,6 +55,18 @@ export default function Projects() {
     });
   };
 
+  // Group projects by type
+  const groupedProjects = projects.reduce((acc, project) => {
+    if (!acc[project.type]) {
+      acc[project.type] = [];
+    }
+    acc[project.type].push(project);
+    return acc;
+  }, {} as Record<string, typeof projects>);
+
+  // Order of project types to display
+  const projectTypeOrder = ["hus", "blandet", "lejlighed", "erhverv"] as const;
+
   if (authLoading || loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -104,60 +116,78 @@ export default function Projects() {
             </CardContent>
           </Card>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {projects.map((project) => (
-              <Card
-                key={project.id}
-                className="cursor-pointer transition-all hover:shadow-lg hover:border-primary/50"
-                onClick={() => handleSelectProject(project.id)}
-              >
-                <CardHeader className="pb-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <CardTitle className="text-lg truncate">
-                        {project.customer.name}
-                      </CardTitle>
-                      <CardDescription className="mt-1">
-                        <Badge variant="secondary" className="text-xs">
-                          {PROJECT_TYPE_LABELS[project.type]}
-                        </Badge>
-                      </CardDescription>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteId(project.id);
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+          <div className="space-y-8">
+            {projectTypeOrder.map((type) => {
+              const projectsOfType = groupedProjects[type];
+              if (!projectsOfType || projectsOfType.length === 0) return null;
+
+              return (
+                <div key={type} className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-2xl font-semibold">{PROJECT_TYPE_LABELS[type]}</h2>
+                    <Badge variant="outline" className="text-sm">
+                      {projectsOfType.length} {projectsOfType.length === 1 ? "projekt" : "projekter"}
+                    </Badge>
                   </div>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  {project.customer.email && (
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <User className="h-4 w-4 flex-shrink-0" />
-                      <span className="truncate">{project.customer.email}</span>
-                    </div>
-                  )}
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <MapPin className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate">
-                      {project.projectAddress || project.customer.address}
-                    </span>
+
+                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    {projectsOfType.map((project) => (
+                      <Card
+                        key={project.id}
+                        className="cursor-pointer transition-all hover:shadow-lg hover:border-primary/50"
+                        onClick={() => handleSelectProject(project.id)}
+                      >
+                        <CardHeader className="pb-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1 min-w-0">
+                              <CardTitle className="text-lg truncate">
+                                {project.customer.name}
+                              </CardTitle>
+                              <CardDescription className="mt-1">
+                                <Badge variant="secondary" className="text-xs">
+                                  {PROJECT_TYPE_LABELS[project.type]}
+                                </Badge>
+                              </CardDescription>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteId(project.id);
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="space-y-2 text-sm">
+                          {project.customer.email && (
+                            <div className="flex items-center gap-2 text-muted-foreground">
+                              <User className="h-4 w-4 flex-shrink-0" />
+                              <span className="truncate">{project.customer.email}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-muted-foreground">
+                            <MapPin className="h-4 w-4 flex-shrink-0" />
+                            <span className="truncate">
+                              {project.projectAddress || project.customer.address}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-muted-foreground pt-2 border-t">
+                            <Calendar className="h-4 w-4 flex-shrink-0" />
+                            <span className="text-xs">
+                              Oprettet {formatDate(project.createdAt)}
+                            </span>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
                   </div>
-                  <div className="flex items-center gap-2 text-muted-foreground pt-2 border-t">
-                    <Calendar className="h-4 w-4 flex-shrink-0" />
-                    <span className="text-xs">
-                      Oprettet {formatDate(project.createdAt)}
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
 
