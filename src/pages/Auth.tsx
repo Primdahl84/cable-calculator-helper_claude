@@ -70,10 +70,10 @@ const Auth = () => {
           setLoading(false);
         }
       }
-    } catch (error: any) {
+    } catch (error) {
       toast({
         title: "Fejl",
-        description: error.message,
+        description: error instanceof Error ? error.message : "Ukendt fejl",
         variant: "destructive",
       });
       setLoading(false);

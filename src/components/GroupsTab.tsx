@@ -10,9 +10,10 @@ import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { SegmentInput } from "./SegmentInput";
 import type { SegmentData } from "@/lib/calculations";
-import { lookupIz, voltageDropDs, getCableImpedancePerKm, ikMinGroup, ikMaxStik, thermalOk } from "@/lib/calculations";
+import { lookupIz, voltageDropDs, getCableImpedancePerKm, ikMinGroup, ikMaxStik, thermalOk, calculateEarthFaultProtection } from "@/lib/calculations";
 import { autoSelectGroupCableSize } from "@/lib/groupCalculations";
 import { getFuseData, fuseTripTimeExplain, DIAZED_SIZES, DIAZED_D2D3D4_SIZES, NEOZED_SIZES, KNIV_SIZES, NH00_SIZES, NH0_SIZES, NH1_SIZES, MCB_SIZES, autoSelectMcbType } from "@/lib/fuseCurves";
+import { MultiFuseCurveChart } from "./MultiFuseCurveChart";
 
 // Helper to check if fuse type uses absolute Ik values instead of multiplier
 const usesAbsoluteIk = (fuseType: string): boolean => {
@@ -38,9 +39,17 @@ const isMeltFuse = (fuseType: string): boolean => {
 import type { CalculationStep } from "./CableCalculator";
 import { useProject } from "@/contexts/ProjectContext";
 
+interface ServiceData {
+  ZkabelMin?: { R: number; X: number };
+  ZkabelMax?: { R: number; X: number };
+  ikTrafo?: string;
+  cosTrafo?: string;
+  IkMin?: number;
+}
+
 interface GroupsTabProps {
   addLog: (title: string, type: 'service' | 'group', steps: CalculationStep[]) => void;
-  serviceData?: any;
+  serviceData?: ServiceData;
 }
 
 type PhaseSystem = "1-faset" | "3-faset";
@@ -61,6 +70,9 @@ interface Group {
   segments: SegmentData[];
   results?: GroupResults;
   mainFuseIn?: string; // Hovedsikring fra forsyning (default 35A)
+  earthFaultSystem?: "TN" | "TT"; // Jordfejlssystem (default TN)
+  sourceZs?: string; // Kildeimpedans Zs for TN-systemer [Ω] (default 0.15)
+  earthResistance?: string; // Jordmodstand Ra for TT-systemer [Ω] (default 50)
 }
 
 interface GroupResults {
@@ -75,6 +87,13 @@ interface GroupResults {
   IkMax?: number;
   IkMaxAngle?: number;
   tripTime?: number;
+  earthFault?: {
+    Zs?: number;
+    Ia?: number;
+    meetsSafetyRequirement: boolean;
+    rcdRequired?: "30mA" | "300mA" | "none";
+    warnings: string[];
+  };
 }
 
 const createDefaultSegment = (): SegmentData => ({
@@ -87,6 +106,7 @@ const createDefaultSegment = (): SegmentData => ({
   kt: 1.0,
   kgrp: 1.0,
   insulationType: "XLPE",
+  cableType: "single-core", // Default til enkeltledere
 });
 
 const createDefaultGroup = (index: number, autoPhase?: "L1" | "L2" | "L3"): Group => ({
@@ -103,6 +123,9 @@ const createDefaultGroup = (index: number, autoPhase?: "L1" | "L2" | "L3"): Grou
   autoSize: true,
   segments: [createDefaultSegment()],
   mainFuseIn: "35", // Standard hovedsikring
+  earthFaultSystem: "TN", // Default til TN-system (mest almindelig i DK)
+  sourceZs: "0.15", // Typisk kildeimpedans for TN-systemer
+  earthResistance: "50", // Typisk jordmodstand for TT-systemer
 });
 
 export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
@@ -128,9 +151,14 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
             fuseType: g.fuseType || "MCB B", // Default fuseType if missing
             mainFuseIn: g.mainFuseIn || "35", // Default hovedsikring if missing
             selectedPhase: g.phase === "1-faset" ? (g.selectedPhase || autoPhase) : undefined, // Auto-assign if missing
+            earthFaultSystem: g.earthFaultSystem || "TN", // Default til TN-system
+            sourceZs: g.sourceZs || "0.15", // Default kildeimpedans
+            earthResistance: g.earthResistance || "50", // Default jordmodstand
             segments: g.segments.map(seg => ({
               ...seg,
-              loadedConductors: g.phase === "3-faset" ? 3 : 2
+              loadedConductors: g.phase === "3-faset" ? 3 : 2,
+              insulationType: seg.insulationType || "XLPE", // Ensure insulationType is set (migration for old data)
+              cableType: seg.cableType || "single-core" // Default to single-core for old data
             }))
           };
         });
@@ -148,7 +176,7 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
   // Save to localStorage whenever groups change
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(groups));
-  }, [groups]);
+  }, [groups, storageKey]);
 
   // Initial calculation on mount - also corrects any legacy data
   useEffect(() => {
@@ -160,12 +188,15 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
         fuseType: g.fuseType || "MCB B", // Ensure fuseType exists
         segments: g.segments.map(seg => ({
           ...seg,
-          loadedConductors: g.phase === "3-faset" ? 3 : 2
+          loadedConductors: g.phase === "3-faset" ? 3 : 2,
+          insulationType: seg.insulationType || "XLPE", // Ensure insulationType is set
+          cableType: seg.cableType || "single-core" // Ensure cableType is set
         }))
       })));
       setTimeout(() => calculateGroups(), 100);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   // Auto-calculate when inputs change (with debounce)
   useEffect(() => {
@@ -200,9 +231,10 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
     const timer = setTimeout(() => {
       calculateGroups();
     }, 300);
-    
+
     return () => clearTimeout(timer);
-  }, [groups]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups]); // calculateGroups is a stable function
 
   const addGroup = () => {
     // Count existing 1-phase groups to determine next phase
@@ -298,7 +330,7 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
         const duMax = parseFloat(group.maxVoltageDrop.replace(",", "."));
         const KjJord = parseFloat(group.KjJord.replace(",", ".") || "1.0");
 
-        let groupResults: GroupResults = {
+        const groupResults: GroupResults = {
           netVoltage: Uv,
           chosenSize: null,
           totalVoltageDropPercent: 0,
@@ -625,6 +657,80 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
           }
         }
 
+        // Earth Fault Protection beregninger (hvis tværsnit er valgt)
+        if (chosenSq > 0) {
+          try {
+            const systemType = group.earthFaultSystem || "TN";
+            const sourceZs = parseFloat(group.sourceZs || "0.15");
+            const earthResistance = parseFloat(group.earthResistance || "50");
+
+            const earthFaultResults = calculateEarthFaultProtection({
+              systemType,
+              voltage: Uv,
+              fuseType: group.fuseType === "MCB automatisk" ? groupResults.selectedMcbType || "MCB B" : group.fuseType,
+              fuseSize: In,
+              segments: activeSegments.map(seg => ({
+                ...seg,
+                crossSection: chosenSq // Brug det valgte tværsnit
+              })),
+              material: group.material,
+              phase: group.phase,
+              sourceZs,
+              earthResistance,
+              circuitType: "final" // Grupper er typisk slutkredsløb
+            });
+
+            groupResults.earthFault = {
+              Zs: earthFaultResults.Zs,
+              Ia: earthFaultResults.Ia,
+              meetsSafetyRequirement: earthFaultResults.meetsSafetyRequirement,
+              rcdRequired: earthFaultResults.rcdRequired,
+              warnings: earthFaultResults.warnings
+            };
+
+            // === JORDFEJLSBESKYTTELSE ===
+            const jordfejlLines: string[] = ["=== Jordfejlsbeskyttelse (DS 183) ==="];
+            jordfejlLines.push(`Systemtype: ${systemType}${systemType === "TN" ? " (TN-C-S/TN-S)" : " (Egen jord)"}`);
+
+            if (systemType === "TN") {
+              jordfejlLines.push(`\nKildeimpedans: Zs,source = ${sourceZs.toFixed(3)} Ω`);
+              jordfejlLines.push(`Total sløjfeimpedans: Zs = ${earthFaultResults.Zs?.toFixed(3)} Ω`);
+              jordfejlLines.push(`Jordfejlsstrøm: Ia = ${earthFaultResults.Ia?.toFixed(1)} A`);
+              jordfejlLines.push(`\nSikring: ${group.fuseType === "MCB automatisk" ? groupResults.selectedMcbType || "MCB B" : group.fuseType} ${In}A`);
+            } else {
+              jordfejlLines.push(`\nJordmodstand: Ra = ${earthResistance.toFixed(1)} Ω`);
+              jordfejlLines.push(`Jordfejlsstrøm: Ia = ${earthFaultResults.Ia?.toFixed(2)} A`);
+            }
+
+            // RCD krav
+            if (earthFaultResults.rcdRequired === "30mA") {
+              jordfejlLines.push(`\n⚠️ HPFI påkrævet: 30 mA (Badeværelse/udendørs)`);
+            } else if (earthFaultResults.rcdRequired === "300mA") {
+              jordfejlLines.push(`\n⚠️ HPFI påkrævet: 300 mA (Sikkerhedskrav ikke opfyldt)`);
+            } else {
+              jordfejlLines.push(`\n✓ HPFI ikke påkrævet (sikkerhedskrav opfyldt)`);
+            }
+
+            // Advarsler
+            if (earthFaultResults.warnings.length > 0) {
+              jordfejlLines.push(`\n=== Advarsler ===`);
+              earthFaultResults.warnings.forEach(w => jordfejlLines.push(w));
+            }
+
+            jordfejlLines.push(`\n${earthFaultResults.meetsSafetyRequirement ? '✓ Jordfejlsbeskyttelse OK' : '✗ Jordfejlsbeskyttelse IKKE OK'}`);
+
+            steps.push({
+              category: 'kortslutning',
+              formula: "Jordfejlsbeskyttelse",
+              variables: jordfejlLines.join("\n"),
+              calculation: "",
+              result: earthFaultResults.meetsSafetyRequirement ? `✓ Jordfejlsbeskyttelse OK` : `✗ Jordfejlsbeskyttelse IKKE OK`
+            });
+          } catch (error) {
+            console.error("Fejl i jordfejlsberegninger:", error);
+          }
+        }
+
         allSteps.push(steps);
         return { ...newGroup, results: groupResults };
       });
@@ -843,6 +949,56 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
                     </div>
                   </div>
 
+                  {/* Earth Fault Protection Settings */}
+                  <Card className="border-blue-200 bg-blue-50/50">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Jordfejlsbeskyttelse (DS 183)</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                        <div className="space-y-1">
+                          <Label>Jordsystem</Label>
+                          <Select
+                            value={group.earthFaultSystem || "TN"}
+                            onValueChange={(value: "TN" | "TT") => updateGroup(group.id, { earthFaultSystem: value })}
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="TN">TN (TN-C-S/TN-S)</SelectItem>
+                              <SelectItem value="TT">TT (Egen jord)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {group.earthFaultSystem === "TN" && (
+                          <div className="space-y-1">
+                            <Label>Kildeimpedans Zs [Ω]</Label>
+                            <Input
+                              type="number"
+                              step="0.01"
+                              value={group.sourceZs || "0.15"}
+                              onChange={(e) => updateGroup(group.id, { sourceZs: e.target.value })}
+                            />
+                          </div>
+                        )}
+
+                        {group.earthFaultSystem === "TT" && (
+                          <div className="space-y-1">
+                            <Label>Jordmodstand Ra [Ω]</Label>
+                            <Input
+                              type="number"
+                              step="0.1"
+                              value={group.earthResistance || "50"}
+                              onChange={(e) => updateGroup(group.id, { earthResistance: e.target.value })}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+
                   <div className="space-y-1">
                     <Label>Auto tværsnit</Label>
                     <Select
@@ -886,6 +1042,9 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
                           segment={segment}
                           onChange={(data) => updateGroupSegment(group.id, index, data)}
                           phases={group.phase}
+                          material={group.material}
+                          earthSystem={group.earthFaultSystem}
+                          circuitType="final"
                         />
                       </div>
                     ))}
@@ -946,6 +1105,70 @@ export function GroupsTab({ addLog, serviceData }: GroupsTabProps) {
                             </>
                           )}
                         </div>
+
+                        {/* Earth Fault Protection Results */}
+                        {group.results.earthFault && (
+                          <div className="mt-4 pt-4 border-t">
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="text-xs font-semibold">Jordfejlsbeskyttelse</div>
+                              {group.results.earthFault.meetsSafetyRequirement ? (
+                                <Badge variant="default" className="bg-green-500">✓ OK</Badge>
+                              ) : (
+                                <Badge variant="destructive">✗ IKKE OK</Badge>
+                              )}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-3">
+                              {group.results.earthFault.Zs !== undefined && (
+                                <div className="space-y-0.5">
+                                  <div className="text-xs text-muted-foreground">Sløjfeimpedans Zs:</div>
+                                  <div className="text-sm font-bold">{group.results.earthFault.Zs.toFixed(3)} Ω</div>
+                                </div>
+                              )}
+
+                              {group.results.earthFault.Ia !== undefined && (
+                                <div className="space-y-0.5">
+                                  <div className="text-xs text-muted-foreground">Jordfejlsstrøm Ia:</div>
+                                  <div className="text-sm font-bold">{group.results.earthFault.Ia.toFixed(1)} A</div>
+                                </div>
+                              )}
+
+                              {group.results.earthFault.rcdRequired && group.results.earthFault.rcdRequired !== "none" && (
+                                <div className="space-y-0.5">
+                                  <div className="text-xs text-muted-foreground">HPFI krav:</div>
+                                  <Badge variant="outline" className="text-xs">{group.results.earthFault.rcdRequired}</Badge>
+                                </div>
+                              )}
+                            </div>
+
+                            {group.results.earthFault.warnings.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                {group.results.earthFault.warnings.map((warning, idx) => (
+                                  <div key={idx} className="text-xs text-amber-600 dark:text-amber-400">
+                                    {warning}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Fuse curve chart */}
+                        {group.results && group.results.IkMin !== undefined && (
+                          <div className="mt-4 pt-4 border-t">
+                            <div className="text-xs font-semibold mb-1">Sikringskurver</div>
+                            <div className="text-xs text-muted-foreground mb-2">
+                              {group.results.selectedMcbType || group.fuseType} med {group.In}A fremhævet, Ik,min = {group.results.IkMin.toFixed(1)} A
+                            </div>
+                            <MultiFuseCurveChart
+                              manufacturer="Standard"
+                              fuseType={group.results.selectedMcbType || group.fuseType}
+                              selectedFuseSize={parseFloat(group.In)}
+                              highlightCurrent={group.results.IkMin}
+                              highlightLabel={`Ik,min = ${group.results.IkMin.toFixed(1)} A`}
+                            />
+                          </div>
+                        )}
                       </CardContent>
                     </Card>
                   )}

@@ -9,14 +9,27 @@ import { useEffect } from "react";
 
 const Calculations = () => {
   const navigate = useNavigate();
-  const { currentProject } = useProject();
+  const { currentProject, loading } = useProject();
 
   useEffect(() => {
-    if (!currentProject) {
+    // Only redirect if we're done loading and still have no project
+    if (!loading && !currentProject) {
       navigate("/");
     }
-  }, [currentProject, navigate]);
+  }, [currentProject, loading, navigate]);
 
+  // Show loading state while projects are being loaded
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-lg">Indlæser projekt...</div>
+        </div>
+      </div>
+    );
+  }
+
+  // If not loading and no project, don't render (useEffect will redirect)
   if (!currentProject) {
     return null;
   }

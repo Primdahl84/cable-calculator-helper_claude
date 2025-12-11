@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, ReactNode } from "react
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import type { Project, ProjectType, CustomerInfo } from "@/types/project";
+import type { User } from "@supabase/supabase-js";
 
 interface ProjectContextType {
   projects: Project[];
@@ -20,7 +21,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [authLoading, setAuthLoading] = useState(true);
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
 
   // Initialize auth state
   useEffect(() => {
@@ -51,7 +52,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   // Load projects when user changes
   useEffect(() => {
     if (authLoading) return;
-    
+
     if (user) {
       loadProjects();
     } else {
@@ -59,7 +60,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       setCurrentProject(null);
       setLoading(false);
     }
-  }, [user, authLoading]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, authLoading]); // loadProjects is stable
 
   const loadProjects = async () => {
     if (!user) {
@@ -117,7 +119,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         .insert([{
           user_id: user.id,
           type: project.type,
-          customer: project.customer as any,
+          customer: project.customer || "",
           project_address: project.projectAddress,
           segments: [],
           groups: [],
@@ -153,7 +155,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     if (!user) return;
 
     try {
-      const dbUpdates: any = {};
+      const dbUpdates: Partial<{
+        type: string;
+        customer: string;
+        project_address: string;
+      }> = {};
       if (updates.type !== undefined) dbUpdates.type = updates.type;
       if (updates.customer !== undefined) dbUpdates.customer = updates.customer;
       if (updates.projectAddress !== undefined) dbUpdates.project_address = updates.projectAddress;
@@ -234,6 +240,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useProject() {
   const context = useContext(ProjectContext);
   if (context === undefined) {

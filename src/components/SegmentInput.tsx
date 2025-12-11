@@ -4,7 +4,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ChevronDown } from "lucide-react";
 import type { SegmentData } from "@/lib/calculations";
-import { STANDARD_SIZES, calculateKt, calculateKgrp } from "@/lib/calculations";
+import { STANDARD_SIZES, calculateKt, calculateKgrp, calculateMinimumEarthConductorSize } from "@/lib/calculations";
 import { INSTALLATIONSMETODER, INSTALLATION_METHOD_IMAGES } from "@/lib/tables";
 
 interface SegmentInputProps {
@@ -12,6 +12,9 @@ interface SegmentInputProps {
   onChange: (data: Partial<SegmentData>) => void;
   phases?: "1-faset" | "3-faset";
   disableCrossSection?: boolean;
+  material?: "Cu" | "Al"; // Material for earth conductor sizing
+  earthSystem?: "TN" | "TT"; // Earth fault protection system type
+  circuitType?: "distribution" | "final"; // Circuit type (stikledning/hovedtavle vs gruppe)
 }
 
 const INSTALL_METHODS = Object.entries(INSTALLATIONSMETODER).map(([num, data]) => ({
@@ -29,7 +32,7 @@ function environmentFromInstallMethod(ref: string): "luft" | "jord" {
   return ref.startsWith("D") ? "jord" : "luft";
 }
 
-export function SegmentInput({ segment, onChange, phases, disableCrossSection }: SegmentInputProps) {
+export function SegmentInput({ segment, onChange, phases, disableCrossSection, material = "Cu", earthSystem, circuitType }: SegmentInputProps) {
   const [currentMethodNumber, setCurrentMethodNumber] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -45,7 +48,8 @@ export function SegmentInput({ segment, onChange, phases, disableCrossSection }:
         onChange({ loadedConductors: conductors });
       }
     }
-  }, [phases]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phases]); // onChange and segment.loadedConductors intentionally omitted to avoid infinite loop
   
   // Auto-beregn Kt og kgrp når relevante felter ændres
   useEffect(() => {
@@ -55,7 +59,26 @@ export function SegmentInput({ segment, onChange, phases, disableCrossSection }:
     onChange({ kt, kgrp });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [segment.ambientTemp, segment.cablesGrouped, segment.installMethod]);
-  
+
+  // Auto-calculate earth conductor size when phase conductor size or cable type changes
+  useEffect(() => {
+    if (segment.crossSection) {
+      const cableType = segment.cableType || "single-core";
+      const minEarthSize = calculateMinimumEarthConductorSize(
+        segment.crossSection,
+        material,
+        cableType,
+        earthSystem,
+        circuitType
+      );
+      // Update if not set OR if cable type changed (to recalculate)
+      if (!segment.earthConductorSize || segment.earthConductorSize !== minEarthSize) {
+        onChange({ earthConductorSize: minEarthSize });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segment.crossSection, segment.cableType, material, earthSystem, circuitType]);
+
   // Preload all images when component mounts
   useEffect(() => {
     Object.values(INSTALLATION_METHOD_IMAGES).forEach((src) => {
@@ -227,6 +250,23 @@ export function SegmentInput({ segment, onChange, phases, disableCrossSection }:
       </div>
 
       <div className="space-y-1">
+        <Label className="text-xs">Kabel-type</Label>
+        <Select
+          value={segment.cableType || "single-core"}
+          onValueChange={(value: "multi-core" | "single-core" | "armored") => onChange({ cableType: value })}
+        >
+          <SelectTrigger className="h-7 text-sm px-2">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="multi-core">Flerleder (5×...mm²)</SelectItem>
+            <SelectItem value="single-core">Enkeltledere</SelectItem>
+            <SelectItem value="armored">Armeret kabel</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1">
         <Label className="text-xs">Isoleringstype</Label>
         <Select
           value={segment.insulationType || "XLPE"}
@@ -257,6 +297,33 @@ export function SegmentInput({ segment, onChange, phases, disableCrossSection }:
                 {num} {num === 1 ? "kabel" : "kabler"}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs">Jordleder [mm²]</Label>
+        <Select
+          value={(segment.earthConductorSize || calculateMinimumEarthConductorSize(segment.crossSection, material, segment.cableType || "single-core", earthSystem, circuitType)).toString()}
+          onValueChange={(value) => onChange({ earthConductorSize: parseFloat(value) })}
+          disabled={segment.cableType === "multi-core"} // Kan ikke ændres for flerleder-kabler
+        >
+          <SelectTrigger className="h-7 text-sm px-2">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {STANDARD_SIZES.filter(size => size <= segment.crossSection).map((size) => {
+              const cableType = segment.cableType || "single-core";
+              const minSize = calculateMinimumEarthConductorSize(segment.crossSection, material, cableType, earthSystem, circuitType);
+              const isValid = size >= minSize;
+              const isMultiCore = cableType === "multi-core";
+              const isTTDistribution = earthSystem === "TT" && circuitType === "distribution";
+              return (
+                <SelectItem key={size} value={size.toString()} disabled={!isValid}>
+                  {size} mm²{size === minSize && !isMultiCore ? (isTTDistribution ? " (jordspyd)" : " (min)") : ""}{isMultiCore && size === segment.crossSection ? " (integreret)" : ""}
+                </SelectItem>
+              );
+            })}
           </SelectContent>
         </Select>
       </div>

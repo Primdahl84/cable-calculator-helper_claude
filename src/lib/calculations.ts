@@ -44,12 +44,36 @@ export interface SegmentData {
   kt: number;
   kgrp: number;
   insulationType?: "XLPE" | "PVC"; // Cable insulation type
+  cableType?: "multi-core" | "single-core" | "armored"; // Cable construction type
+  earthConductorSize?: number; // Protective earth conductor cross-section [mm²]
 }
 
 export interface CableImpedance {
   R: number;
   X: number;
   Z: number;
+}
+
+export interface RCDRequirement {
+  required: boolean;
+  reason: string;
+  type: "30mA" | "300mA" | "None";
+  tripTime: "instantaneous" | "time-delayed";
+  location: "final-circuit" | "distribution-board";
+}
+
+export interface EarthFaultResults {
+  systemType: "TN" | "TT"; // Earthing system type
+  Zs: number;              // Earth fault loop impedance (Ω)
+  Ra?: number;             // Earth electrode resistance for TT systems (Ω)
+  ZsMax: number;           // Maximum allowed Zs for disconnection time (Ω)
+  Ia: number;              // Actual earth fault current (A)
+  IaRequired: number;      // Required earth fault current for disconnection (A)
+  disconnectionTime: number; // Actual disconnection time (s)
+  touchVoltage: number;    // Prospective touch voltage (V)
+  rcdRequirement: RCDRequirement;
+  complianceOk: boolean;   // Whether earth fault protection is adequate
+  warnings: string[];      // List of warning messages
 }
 
 /**
@@ -865,4 +889,385 @@ export function checkParallelCableProtection(
     recommendation,
   };
 }
+
+/**
+ * Calculate minimum main earth conductor size per DS 183 §542.3.1
+ * (Hovedjordledning til tavle)
+ *
+ * @param material Cable material (Cu or Al)
+ * @param isProtected Whether conductor is mechanically protected
+ * @returns Minimum main earth conductor size [mm²]
+ */
+export function calculateMinimumMainEarthConductor(
+  material: "Cu" | "Al",
+  isProtected: boolean = true
+): number {
+  // DS 183 §542.3.1: Hovedjordledning
+  if (material === "Cu") {
+    return isProtected ? 6 : 16; // 6mm² beskyttet, 16mm² ubeskyttet
+  } else {
+    return isProtected ? 16 : 25; // 16mm² beskyttet, 25mm² ubeskyttet
+  }
+}
+
+/**
+ * Calculate earth conductor size per DS 183 Table 54.2 and §543.1.1
+ *
+ * @param phaseConductorSize Phase conductor cross-section [mm²]
+ * @param material Cable material (Cu or Al)
+ * @param cableType Cable construction type
+ * @returns Minimum required earth conductor size [mm²]
+ */
+export function calculateMinimumEarthConductorSize(
+  phaseConductorSize: number,
+  material: "Cu" | "Al",
+  cableType: "multi-core" | "single-core" | "armored" = "single-core",
+  earthSystem?: "TN" | "TT",
+  circuitType?: "distribution" | "final"
+): number {
+  // DS 183 §542.3.1: TT-system hovedjordledning (main earth conductor to earth electrode)
+  // For TT-system stikledning: The service cable does NOT include PE from grid
+  // Instead, there's a local earth spike (jordspyd) connection: min 6mm² Cu protected
+  if (earthSystem === "TT" && circuitType === "distribution") {
+    return material === "Cu" ? 6 : 10; // 6mm² Cu or 10mm² Al (mechanically protected)
+  }
+
+  // DS 183 §543.1.1: Flerleder-kabler (integrated earth in cable)
+  // PE er fysisk integreret i kablet og har ALTID samme størrelse som faselederne
+  // Eksempel: 5×25mm² PFXP har PE = 25mm² (kan ikke reduceres)
+  if (cableType === "multi-core") {
+    return phaseConductorSize; // Altid samme størrelse når integreret
+  }
+
+  // DS 183 Table 54.2 (separate earth conductor - enkeltledere eller armering):
+  // If S ≤ 16mm²: PE = S (same size as phase)
+  // If 16mm² < S ≤ 35mm²: PE = 16mm² (kan reduceres)
+  // If S > 35mm²: PE = S/2 (kan reduceres til halv størrelse)
+
+  if (phaseConductorSize <= 16) {
+    return phaseConductorSize;
+  } else if (phaseConductorSize <= 35) {
+    return 16;
+  } else {
+    return phaseConductorSize / 2;
+  }
+}
+
+/**
+ * Calculate earth conductor resistance per km
+ * Uses same formula as phase conductor resistance
+ *
+ * @param crossSection Earth conductor cross-section [mm²]
+ * @param material Cable material (Cu or Al)
+ * @param temperature Conductor temperature [°C] (default 20°C for earth conductor)
+ * @returns Resistance [Ω/km]
+ */
+export function getEarthConductorResistance(
+  crossSection: number,
+  material: "Cu" | "Al",
+  temperature: number = 20
+): number {
+  // Use NKT tables if available, otherwise calculate
+  const nkt_r_table = temperature === 70 ? NKT_R_70 :
+                      temperature === 90 ? NKT_R_90 :
+                      NKT_R;
+
+  const matDataR = nkt_r_table?.[material];
+  if (matDataR && matDataR[crossSection] !== undefined) {
+    return matDataR[crossSection];
+  }
+
+  // Fallback calculation using resistivity
+  const resistivity = material === "Cu" ? 0.0175 : 0.0283; // Ω·mm²/m at 20°C
+  return (resistivity * 1000) / crossSection; // Ω/km
+}
+
+/**
+ * Calculate earth fault loop impedance (Zs)
+ * Zs = Zs(source) + R₁ + R₂
+ *
+ * @param sourceZs Source earth fault loop impedance [Ω]
+ * @param phaseResistance Phase conductor resistance [Ω]
+ * @param earthResistance Earth conductor resistance [Ω]
+ * @returns Earth fault loop impedance [Ω]
+ */
+export function calculateEarthFaultLoopImpedance(
+  sourceZs: number,
+  phaseResistance: number,
+  earthResistance: number
+): number {
+  // Zs = Zs(forsyning) + R₁ + R₂
+  // R₁ = phase conductor resistance
+  // R₂ = earth conductor resistance
+  return sourceZs + phaseResistance + earthResistance;
+}
+
+/**
+ * Calculate earth fault current
+ *
+ * @param voltage Phase-to-earth voltage [V] (typically 230V for TN systems)
+ * @param Zs Earth fault loop impedance [Ω]
+ * @returns Earth fault current [A]
+ */
+export function calculateEarthFaultCurrent(
+  voltage: number,
+  Zs: number
+): number {
+  if (Zs <= 0) return 0;
+  return voltage / Zs;
+}
+
+/**
+ * Calculate prospective touch voltage
+ *
+ * @param earthFaultCurrent Earth fault current [A]
+ * @param earthResistance Earth conductor resistance [Ω]
+ * @returns Touch voltage [V]
+ */
+export function calculateTouchVoltage(
+  earthFaultCurrent: number,
+  earthResistance: number
+): number {
+  // Touch voltage = Ia × R₂
+  return earthFaultCurrent * earthResistance;
+}
+
+/**
+ * Determine RCD requirement per DS 183 §411.3
+ *
+ * @param systemType Earthing system type ("TN" | "TT")
+ * @param circuitType Type of circuit ("socket" | "fixed-equipment" | "distribution" | "lighting")
+ * @param current Circuit rated current [A]
+ * @param location Location ("bathroom" | "outdoor" | "indoor")
+ * @param ZsCompliant Whether Zs allows proper disconnection with fuse/MCB alone
+ * @returns RCD requirement details
+ */
+export function determineRCDRequirement(
+  systemType: "TN" | "TT",
+  circuitType: "socket" | "fixed-equipment" | "distribution" | "lighting",
+  current: number,
+  location: "bathroom" | "outdoor" | "indoor",
+  ZsCompliant: boolean
+): RCDRequirement {
+  // DS 183 §411.3.2: 30mA RCD mandatory for:
+  // - All socket outlets ≤20A (TN systems)
+  // - Bathrooms (all circuits)
+  // - Outdoor circuits
+  // - ALL final circuits in TT systems (cannot achieve 0.4s without RCD)
+
+  // TT systems: RCD ALWAYS required for final circuits
+  if (systemType === "TT" && circuitType !== "distribution") {
+    return {
+      required: true,
+      reason: "TT-system - RCD påkrævet for alle slutgrupper (DS 183 §411.5.3)",
+      type: "30mA",
+      tripTime: "instantaneous",
+      location: "final-circuit"
+    };
+  }
+
+  // Check for mandatory 30mA RCD in TN systems
+  if (circuitType === "socket" && current <= 20) {
+    return {
+      required: true,
+      reason: "Stikkontakt ≤20A (DS 183 §411.3.2)",
+      type: "30mA",
+      tripTime: "instantaneous",
+      location: "final-circuit"
+    };
+  }
+
+  if (location === "bathroom") {
+    return {
+      required: true,
+      reason: "Badeværelsesgruppe (DS 183 §701.411.3.3)",
+      type: "30mA",
+      tripTime: "instantaneous",
+      location: "final-circuit"
+    };
+  }
+
+  if (location === "outdoor") {
+    return {
+      required: true,
+      reason: "Udendørs gruppe (DS 183 §411.3.2)",
+      type: "30mA",
+      tripTime: "instantaneous",
+      location: "final-circuit"
+    };
+  }
+
+  // Check if Zs is too high (fuse/MCB cannot disconnect in time)
+  if (!ZsCompliant) {
+    return {
+      required: true,
+      reason: "Zs for høj - sikring kan ikke udløse inden 0,4s",
+      type: "30mA",
+      tripTime: "instantaneous",
+      location: "final-circuit"
+    };
+  }
+
+  // Distribution boards: recommend 300mA for fire protection
+  if (circuitType === "distribution") {
+    return {
+      required: false, // Not strictly required, but recommended
+      reason: "Anbefalet for brandsbeskyttelse (DS 183 §422.3.9)",
+      type: "300mA",
+      tripTime: "time-delayed",
+      location: "distribution-board"
+    };
+  }
+
+  // No RCD required
+  return {
+    required: false,
+    reason: "Ingen RCD-krav for denne gruppe",
+    type: "None",
+    tripTime: "instantaneous",
+    location: "final-circuit"
+  };
+}
+
+/**
+ * Calculate complete earth fault protection for a circuit
+ *
+ * @param systemType Earthing system type ("TN" | "TT")
+ * @param sourceZs Source earth fault loop impedance [Ω] (for TN systems)
+ * @param earthResistance Earth electrode resistance [Ω] (for TT systems, typical 10-100Ω)
+ * @param segments Array of cable segments
+ * @param material Cable material
+ * @param voltage Phase-to-earth voltage [V] (default 230V)
+ * @param protectionDeviceRating Protection device rating [A]
+ * @param circuitType Type of circuit
+ * @param location Circuit location
+ * @param requiredDisconnectionTime Required disconnection time [s] (0.4s for final circuits, 5s for distribution)
+ * @returns Complete earth fault protection results
+ */
+export function calculateEarthFaultProtection(
+  systemType: "TN" | "TT",
+  sourceZs: number,
+  earthResistance: number,
+  segments: SegmentData[],
+  material: "Cu" | "Al",
+  voltage: number = 230,
+  protectionDeviceRating: number,
+  circuitType: "socket" | "fixed-equipment" | "distribution" | "lighting",
+  location: "bathroom" | "outdoor" | "indoor",
+  requiredDisconnectionTime: number = 0.4
+): EarthFaultResults {
+  const warnings: string[] = [];
+
+  // Calculate total phase and earth conductor resistance
+  let totalPhaseResistance = 0;
+  let totalEarthResistance = 0;
+
+  for (const seg of segments) {
+    const lengthKm = seg.length / 1000;
+
+    // Phase conductor resistance
+    const { R: phaseR } = getCableImpedancePerKm(seg.crossSection, material, "3-faset", 70);
+    totalPhaseResistance += phaseR * lengthKm;
+
+    // Earth conductor resistance
+    const earthSize = seg.earthConductorSize || calculateMinimumEarthConductorSize(seg.crossSection, material);
+    const earthR = getEarthConductorResistance(earthSize, material, 20);
+    totalEarthResistance += earthR * lengthKm;
+
+    // Check if earth conductor is undersized
+    const cableType = seg.cableType || "single-core";
+    const minEarthSize = calculateMinimumEarthConductorSize(seg.crossSection, material, cableType);
+    if (earthSize < minEarthSize) {
+      warnings.push(`Segment: Jordleder ${earthSize}mm² < minimum ${minEarthSize}mm² (DS 183 Table 54.2)`);
+    }
+  }
+
+  // Check hovedjordledning minimum (DS 183 §542.3.1)
+  // For hovedtavle-tilslutninger skal jordleder være minimum 6mm² Cu (beskyttet)
+  const minMainEarthSize = calculateMinimumMainEarthConductor(material, true);
+  const minSegmentEarthSize = Math.min(...segments.map(s => s.earthConductorSize || calculateMinimumEarthConductorSize(s.crossSection, material, s.cableType || "single-core")));
+  if (circuitType === "distribution" && minSegmentEarthSize < minMainEarthSize) {
+    warnings.push(`⚠️ ADVARSEL: Hovedjordledning ${minSegmentEarthSize}mm² < minimum ${minMainEarthSize}mm² ${material} (DS 183 §542.3.1)`);
+  }
+
+  // Calculate Zs (cable impedance only for TN, includes Ra for TT)
+  const Zs = calculateEarthFaultLoopImpedance(sourceZs, totalPhaseResistance, totalEarthResistance);
+
+  // Calculate earth fault current based on system type
+  let Ia: number;
+  let effectiveZs: number;
+
+  if (systemType === "TT") {
+    // TT system: Ia = U0 / (Zs + Ra)
+    effectiveZs = Zs + earthResistance;
+    Ia = calculateEarthFaultCurrent(voltage, effectiveZs);
+
+    if (earthResistance > 100) {
+      warnings.push(`⚠️ TT-system: Høj jordmodstand Ra=${earthResistance.toFixed(1)}Ω (typisk 10-100Ω) - meget lav jordfejlsstrøm`);
+    }
+  } else {
+    // TN system: Ia = U0 / Zs
+    effectiveZs = Zs;
+    Ia = calculateEarthFaultCurrent(voltage, Zs);
+  }
+
+  // Calculate touch voltage
+  const touchVoltage = calculateTouchVoltage(Ia, totalEarthResistance);
+
+  // Check touch voltage limit (50V AC per DS 183 §411.3.2.2)
+  if (touchVoltage > 50) {
+    warnings.push(`Berøringsspænding ${touchVoltage.toFixed(1)}V > 50V grænse`);
+  }
+
+  // Required earth fault current for disconnection
+  // For fuses: typically 5 × In for 5s, higher for 0.4s
+  // For MCBs: Type B = 5 × In, Type C = 10 × In, Type D = 20 × In
+  // Conservative estimate: 5 × In for 0.4s disconnection
+  const IaRequired = protectionDeviceRating * 5;
+
+  // Maximum allowed Zs for required disconnection time
+  const ZsMax = voltage / IaRequired;
+
+  // Check if Zs allows proper disconnection
+  const ZsCompliant = effectiveZs <= ZsMax;
+
+  if (!ZsCompliant && systemType === "TN") {
+    warnings.push(`Zs (${effectiveZs.toFixed(4)}Ω) > Zs,max (${ZsMax.toFixed(4)}Ω) - sikring kan ikke udløse i tide`);
+  }
+
+  if (systemType === "TT" && !ZsCompliant) {
+    warnings.push(`TT-system: Zs+Ra (${effectiveZs.toFixed(4)}Ω) >> Zs,max (${ZsMax.toFixed(4)}Ω) - RCD PÅKRÆVET`);
+  }
+
+  // Determine RCD requirement
+  const rcdRequirement = determineRCDRequirement(systemType, circuitType, protectionDeviceRating, location, ZsCompliant);
+
+  // Estimate disconnection time (simplified - actual depends on fuse curve)
+  const disconnectionTime = ZsCompliant ? requiredDisconnectionTime : Infinity;
+
+  // Overall compliance
+  // For TT systems, RCD is mandatory - compliance depends on RCD being present
+  // For TN systems, compliance requires either Zs compliance OR RCD
+  const complianceOk = systemType === "TT" ? rcdRequirement.required : (ZsCompliant || rcdRequirement.required);
+
+  if (!complianceOk) {
+    warnings.push("ADVARSEL: Jordfejlsbeskyttelse utilstrækkelig - RCD påkrævet!");
+  }
+
+  return {
+    systemType,
+    Zs,
+    Ra: systemType === "TT" ? earthResistance : undefined,
+    ZsMax,
+    Ia,
+    IaRequired,
+    disconnectionTime,
+    touchVoltage,
+    rcdRequirement,
+    complianceOk,
+    warnings
+  };
+}
+
+
 

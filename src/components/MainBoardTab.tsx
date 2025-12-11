@@ -10,6 +10,8 @@ import { Calculator, Plus, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { SegmentInput } from "./SegmentInput";
 import type { SegmentData } from "@/lib/calculations";
+import type { ApartmentData } from "./ApartmentDetailView";
+import type { CalculationStep } from "./CableCalculator";
 import {
   lookupIz,
   voltageDropDs,
@@ -18,9 +20,12 @@ import {
   ikMaxStik,
   thermalOk,
   STANDARD_SIZES,
+  calculateEarthFaultProtection,
+  calculateMinimumEarthConductorSize,
 } from "@/lib/calculations";
 import { getFuseData, fuseTripTimeExplain, isFuseSizeAvailable, getAvailableFuseSizes } from "@/lib/fuseCurves";
 import { useProject } from "@/contexts/ProjectContext";
+import { MultiFuseCurveChart } from "./MultiFuseCurveChart";
 
 // Standard fuse sizes in amperes
 const STANDARD_FUSE_SIZES = [10, 13, 16, 20, 25, 32, 35, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630];
@@ -36,11 +41,14 @@ interface MainBoardData {
   autoSize: boolean;
   autoFuseSize: boolean;
   segments: SegmentData[];
+  earthFaultSystem?: "TN" | "TT"; // Jordfejlssystem (default TN for hovedtavle)
+  sourceZs?: string; // Kildeimpedans Zs for TN-systemer [Ω]
+  earthResistance?: string; // Jordmodstand Ra for TT-systemer [Ω]
 }
 
 interface MainBoardTabProps {
-  apartments: any[];
-  onAddLog?: (title: string, type: 'service' | 'group', steps: any[]) => void;
+  apartments: ApartmentData[];
+  onAddLog?: (title: string, type: 'service' | 'group', steps: CalculationStep[]) => void;
 }
 
 const createDefaultSegment = (): SegmentData => ({
@@ -53,6 +61,7 @@ const createDefaultSegment = (): SegmentData => ({
   kt: 1.0,
   kgrp: 1.0,
   insulationType: "XLPE",
+  cableType: "single-core",
 });
 
 export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
@@ -64,7 +73,22 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     const saved = localStorage.getItem(storageKey);
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        // Ensure all segments have insulationType and cableType set (migration for old data)
+        if (parsed.segments) {
+          parsed.segments = parsed.segments.map((seg: SegmentData) => ({
+            ...seg,
+            insulationType: seg.insulationType || "XLPE",
+            cableType: seg.cableType || "single-core",
+          }));
+        }
+        // Ensure earth fault protection fields exist (migration for old data)
+        return {
+          ...parsed,
+          earthFaultSystem: parsed.earthFaultSystem || "TN", // TN er standard for hovedtavle
+          sourceZs: parsed.sourceZs || "0.15",
+          earthResistance: parsed.earthResistance || "50",
+        };
       } catch {
         return {
           ikTrafo: "16000",
@@ -77,6 +101,9 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
           autoSize: true,
           autoFuseSize: true,
           segments: [createDefaultSegment()],
+          earthFaultSystem: "TN", // TN er standard for hovedtavle
+          sourceZs: "0.15",
+          earthResistance: "50",
         };
       }
     }
@@ -91,11 +118,15 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       autoSize: true,
       autoFuseSize: true,
       segments: [createDefaultSegment()],
+      earthFaultSystem: "TN", // TN er standard for hovedtavle
+      sourceZs: "0.15",
+      earthResistance: "50",
     };
   });
 
   const [results, setResults] = useState<{
     chosenSize: number | null;
+    earthConductorSize: number | null; // Calculated earth conductor size
     totalCurrent: number;
     totalLength: number;
     totalVoltageDrop: number;
@@ -107,57 +138,19 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     faultWarning: boolean;
     tripTime: number;
     fuseUnavailableWarning: string;
+    recommendedIndividualFuseSize?: number; // For parallel cables
+    individualCableCurrent?: number; // Current per cable
+    earthFault?: {
+      Zs?: number;
+      Ia?: number;
+      meetsSafetyRequirement: boolean;
+      rcdRequired?: "30mA" | "300mA" | "none";
+      warnings: string[];
+    } | null;
   } | null>(null);
 
   // Track last calculation to prevent redundant calculations
   const lastCalculationRef = useRef<string>("");
-
-  // Auto-update fuse size based on total current (only if autoFuseSize is enabled)
-  useEffect(() => {
-    if (!mainBoardData.autoFuseSize) return;
-    
-    const totalCurrent = calculateTotalCurrent();
-    if (totalCurrent > 0) {
-      const recommendedFuseSize = STANDARD_FUSE_SIZES.find(size => size >= totalCurrent) || STANDARD_FUSE_SIZES[STANDARD_FUSE_SIZES.length - 1];
-      const currentFuseRating = parseFloat(mainBoardData.fuseRating.replace(",", "."));
-      
-      if (recommendedFuseSize !== currentFuseRating) {
-        setMainBoardData(prev => ({
-          ...prev,
-          fuseRating: recommendedFuseSize.toString()
-        }));
-      }
-    }
-  }, [apartments, mainBoardData.autoFuseSize]);
-
-  // Save state to localStorage whenever it changes
-  useEffect(() => {
-    localStorage.setItem(storageKey, JSON.stringify(mainBoardData));
-  }, [mainBoardData, storageKey]);
-
-  // Auto-calculate main board when data or apartments change
-  useEffect(() => {
-    if (onAddLog && apartments.length > 0) {
-      // Create a hash of current data to detect actual changes
-      const currentDataHash = JSON.stringify({
-        mainBoardData,
-        apartmentIds: apartments.map(a => a.id),
-      });
-
-      // Only calculate if data has actually changed since last calculation
-      if (currentDataHash !== lastCalculationRef.current) {
-        lastCalculationRef.current = currentDataHash;
-        try {
-          calculateMainBoard(false); // Auto calculation - don't show toast
-        } catch (error) {
-          console.error("Main board calculation error:", error);
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          toast.error(`Beregning fejl: ${errorMessage}`);
-          setResults(null);
-        }
-      }
-    }
-  }, [mainBoardData, apartments, onAddLog]);
 
   // Calculate total current from all units included in main board
   const calculateTotalCurrent = (): number => {
@@ -206,16 +199,64 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
 
       const totalPower = basePower * (1 + extraPercent / 100);
       const voltage = parseInt(apt.voltage);
-      
-      if (apt.phases === "3-faset") {
-        totalCurrent += totalPower / (Math.sqrt(3) * voltage * cos);
-      } else {
-        totalCurrent += totalPower / (voltage * cos);
-      }
+      const current = apt.phases === "3-faset"
+        ? totalPower / (Math.sqrt(3) * voltage * cos)
+        : totalPower / (voltage * cos);
+
+      totalCurrent += current;
     }
 
     return totalCurrent;
   };
+
+  // Auto-update fuse size based on total current (only if autoFuseSize is enabled)
+  useEffect(() => {
+    if (!mainBoardData.autoFuseSize) return;
+
+    const totalCurrent = calculateTotalCurrent();
+    if (totalCurrent > 0) {
+      const recommendedFuseSize = STANDARD_FUSE_SIZES.find(size => size >= totalCurrent) || STANDARD_FUSE_SIZES[STANDARD_FUSE_SIZES.length - 1];
+      const currentFuseRating = parseFloat(mainBoardData.fuseRating.replace(",", "."));
+
+      if (recommendedFuseSize !== currentFuseRating) {
+        setMainBoardData(prev => ({
+          ...prev,
+          fuseRating: recommendedFuseSize.toString()
+        }));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apartments, mainBoardData.autoFuseSize, mainBoardData.fuseRating]);
+
+  // Save state to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem(storageKey, JSON.stringify(mainBoardData));
+  }, [mainBoardData, storageKey]);
+
+  // Auto-calculate main board when data or apartments change
+  useEffect(() => {
+    if (onAddLog && apartments.length > 0) {
+      // Create a hash of current data to detect actual changes
+      const currentDataHash = JSON.stringify({
+        mainBoardData,
+        apartmentIds: apartments.map(a => a.id),
+      });
+
+      // Only calculate if data has actually changed since last calculation
+      if (currentDataHash !== lastCalculationRef.current) {
+        lastCalculationRef.current = currentDataHash;
+        try {
+          calculateMainBoard(false); // Auto calculation - don't show toast
+        } catch (error) {
+          console.error("Main board calculation error:", error);
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          toast.error(`Beregning fejl: ${errorMessage}`);
+          setResults(null);
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mainBoardData, apartments, onAddLog]); // calculateMainBoard defined below
 
   const addSegment = () => {
     setMainBoardData({
@@ -259,7 +300,7 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     const cosPhi = 1.0; // Conservative for cable sizing
 
     // Initialize calculation steps for logging
-    const steps: any[] = [];
+    const steps: CalculationStep[] = [];
 
     let chosenSize: number | null = null;
     let totalLength = 0;
@@ -271,11 +312,11 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
 
     // Auto-select cable size if enabled
     const nParallel = parseInt(mainBoardData.parallelCables) || 1;
-    
+
     if (mainBoardData.autoSize) {
       for (const size of STANDARD_SIZES) {
         if (size < 10) continue; // Main board cables should be at least 10mm²
-        
+
         let overloadOk = true;
         for (const seg of mainBoardData.segments) {
           const iz = lookupIz(mainBoardData.material, seg.installMethod, size, seg.loadedConductors, seg.insulationType || "XLPE");
@@ -284,10 +325,11 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
             break;
           }
           const IzCorr = iz * seg.kt * seg.kgrp;
-          // Total capacity is IzCorr multiplied by number of parallel cables
-          const totalCapacity = IzCorr * nParallel;
-          // Check if total current exceeds total capacity
-          if (In > totalCapacity) {
+          // Each parallel cable must be able to handle its share of the current
+          // Current per cable = In / nParallel
+          // Required capacity per cable = In / nParallel
+          const currentPerCable = In / nParallel;
+          if (currentPerCable > IzCorr) {
             overloadOk = false;
             break;
           }
@@ -295,12 +337,13 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
 
         if (!overloadOk) continue;
 
-        // Voltage drop calculation: use total impedance divided by number of parallel cables
+        // Voltage drop calculation
         let duTotal = 0;
         for (const seg of mainBoardData.segments) {
-          // For parallel cables: Z_total = Z_single / n, so voltage drop is also reduced by n
-          const { du } = voltageDropDs(Uv, In, mainBoardData.material, size, seg.length, phases, cosPhi);
-          duTotal += du / nParallel; // Voltage drop is reduced by parallel cables
+          // For parallel cables, use total equivalent cross-section (n × size)
+          const effectiveCrossSection = size * nParallel;
+          const { du } = voltageDropDs(Uv, In, mainBoardData.material, effectiveCrossSection, seg.length, phases, cosPhi);
+          duTotal += du;
         }
         const duPercent = (duTotal / Uv) * 100;
         const maxDrop = parseFloat(mainBoardData.maxVoltageDrop.replace(",", "."));
@@ -320,11 +363,12 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       return;
     }
 
-    // Calculate voltage drop (reduced by parallel cables)
+    // Calculate voltage drop
     let totalVoltageDrop = 0;
     for (const seg of mainBoardData.segments) {
-      const { du } = voltageDropDs(Uv, In, mainBoardData.material, chosenSize, seg.length, phases, cosPhi);
-      totalVoltageDrop += du / nParallel; // Divided by number of parallel cables
+      const effectiveCrossSection = chosenSize * nParallel;
+      const { du } = voltageDropDs(Uv, In, mainBoardData.material, effectiveCrossSection, seg.length, phases, cosPhi);
+      totalVoltageDrop += du;
     }
     const voltageDropPercent = (totalVoltageDrop / Uv) * 100;
 
@@ -449,9 +493,17 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     
     // === IZ,NØDVENDIG BEREGNING ===
     const izNødvendigLines: string[] = ["=== Iz,nødvendig beregning ==="];
+    if (nParallel > 1) {
+      izNødvendigLines.push(`Strøm per kabel: ${(In / nParallel).toFixed(2)} A (total ${In.toFixed(2)} A / ${nParallel} kabler)`);
+    }
     mainBoardData.segments.forEach((seg, idx) => {
-      const izNødvendig = In / (seg.kt * seg.kgrp * nParallel);
-      izNødvendigLines.push(`Segment ${idx + 1}: Iz,nødvendig = ${In.toFixed(2)} / (${seg.kt.toFixed(3)} × 1.000 × ${seg.kgrp.toFixed(3)}${nParallel > 1 ? ` × ${nParallel}` : ""}) = ${izNødvendig.toFixed(2)} A`);
+      const currentPerCable = In / nParallel;
+      const izNødvendig = currentPerCable / (seg.kt * seg.kgrp);
+      if (nParallel > 1) {
+        izNødvendigLines.push(`Segment ${idx + 1}: Iz,nødvendig = ${currentPerCable.toFixed(2)} / (${seg.kt.toFixed(3)} × 1.000 × ${seg.kgrp.toFixed(3)}) = ${izNødvendig.toFixed(2)} A`);
+      } else {
+        izNødvendigLines.push(`Segment ${idx + 1}: Iz,nødvendig = ${In.toFixed(2)} / (${seg.kt.toFixed(3)} × 1.000 × ${seg.kgrp.toFixed(3)}) = ${izNødvendig.toFixed(2)} A`);
+      }
     });
     
     steps.push({
@@ -466,21 +518,23 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
     const overbelastningLines: string[] = ["=== Iz,korrigeret for valgt kabel ===", `Valgt tværsnit: ${chosenSize} mm²`];
     if (nParallel > 1) {
       overbelastningLines.push(`Antal parallelle kabler: ${nParallel}`);
+      overbelastningLines.push(`Strøm per kabel: ${(In / nParallel).toFixed(2)} A`);
     }
-    
+
     mainBoardData.segments.forEach((seg, idx) => {
       const iz = lookupIz(mainBoardData.material, seg.installMethod, chosenSize || 0, seg.loadedConductors, seg.insulationType || "XLPE");
       const IzCorr = iz * seg.kt * seg.kgrp;
-      const totalCapacity = IzCorr * nParallel;
+      const currentPerCable = In / nParallel;
       overbelastningLines.push(`\nSegment ${idx + 1}:`);
       overbelastningLines.push(`  Iz,tabel = ${iz.toFixed(2)} A`);
       overbelastningLines.push(`  Iz,korrigeret = ${iz.toFixed(2)} × ${seg.kt.toFixed(3)} × 1.000 × ${seg.kgrp.toFixed(3)} = ${IzCorr.toFixed(2)} A`);
       if (nParallel > 1) {
-        overbelastningLines.push(`  Total kapacitet (${nParallel} kabler) = ${IzCorr.toFixed(2)} × ${nParallel} = ${totalCapacity.toFixed(2)} A`);
+        overbelastningLines.push(`  ✓ Strøm per kabel ≤ Iz,korr (${currentPerCable.toFixed(2)} A ≤ ${IzCorr.toFixed(2)} A)`);
+      } else {
+        overbelastningLines.push(`  ${In <= IzCorr ? '✓' : '✗'} In ≤ Iz,korr (${In.toFixed(2)} A ≤ ${IzCorr.toFixed(2)} A)`);
       }
-      overbelastningLines.push(`  ${In <= totalCapacity ? '✓' : '✗'} In ≤ Iz,korr${nParallel > 1 ? '×'+nParallel : ''} (${In.toFixed(2)} A ≤ ${totalCapacity.toFixed(2)} A)`);
     });
-    
+
     overbelastningLines.push(`\nKabel godkendt for overbelastning ✓`);
     
     steps.push({
@@ -624,18 +678,18 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
 
     // === SPÆNDINGSFALD ===
     const spaendingsfaldLines: string[] = ["=== Spændingsfald per segment ==="];
-    
-    mainBoardData.segments.forEach((seg, idx) => {
-      const { du, duPercent } = voltageDropDs(Uv, In, mainBoardData.material, chosenSize || 0, seg.length, phases, cosPhi);
-      const duAdjusted = du / nParallel;
-      const duPercentAdjusted = duPercent / nParallel;
-      spaendingsfaldLines.push(`Segment ${idx + 1}: L=${seg.length}m → ΔU=${duAdjusted.toFixed(2)}V (${duPercentAdjusted.toFixed(2)}%)`);
-    });
-    
-    spaendingsfaldLines.push("\n=== Total spændingsfald ===");
+
     if (nParallel > 1) {
-      spaendingsfaldLines.push(`Note: ${nParallel} parallelle kabler reducerer spændingsfaldet`);
+      spaendingsfaldLines.push(`${nParallel} parallelle kabler á ${chosenSize} mm² = ${chosenSize * nParallel} mm² ækvivalent tværsnit`);
     }
+
+    mainBoardData.segments.forEach((seg, idx) => {
+      const effectiveCrossSection = chosenSize * nParallel;
+      const { du, duPercent } = voltageDropDs(Uv, In, mainBoardData.material, effectiveCrossSection, seg.length, phases, cosPhi);
+      spaendingsfaldLines.push(`Segment ${idx + 1}: L=${seg.length}m → ΔU=${du.toFixed(2)}V (${duPercent.toFixed(2)}%)`);
+    });
+
+    spaendingsfaldLines.push("\n=== Total spændingsfald ===");
     spaendingsfaldLines.push(`Total ΔU = ${totalVoltageDrop.toFixed(2)} V = ${voltageDropPercent.toFixed(2)}%`);
     const maxDrop = parseFloat(mainBoardData.maxVoltageDrop.replace(",", "."));
     spaendingsfaldLines.push(`Grænse: ${maxDrop.toFixed(2)}% → ${voltageDropPercent <= maxDrop ? '✓ OK' : '✗ For højt'}`);
@@ -648,8 +702,117 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       result: `${voltageDropPercent <= maxDrop ? '✓' : '✗'} ΔU = ${voltageDropPercent.toFixed(2)}% ${voltageDropPercent <= maxDrop ? '≤' : '>'} ${maxDrop.toFixed(2)}%`,
     });
 
+    // Calculate recommended individual fuse size for parallel cables
+    let recommendedIndividualFuseSize: number | undefined;
+    let individualCableCurrent: number | undefined;
+
+    if (nParallel > 1) {
+      // Current through each individual cable
+      individualCableCurrent = In / nParallel;
+
+      // Find smallest standard fuse size that can handle this current
+      // Add 10% safety margin
+      const requiredFuseSize = individualCableCurrent * 1.1;
+      recommendedIndividualFuseSize = STANDARD_FUSE_SIZES.find(size => size >= requiredFuseSize)
+        || STANDARD_FUSE_SIZES[STANDARD_FUSE_SIZES.length - 1];
+    }
+
+    // JORDFEJLSBESKYTTELSE (EARTH FAULT PROTECTION)
+    let earthFaultResults: {
+      Zs?: number;
+      Ia?: number;
+      meetsSafetyRequirement: boolean;
+      rcdRequired?: "30mA" | "300mA" | "none";
+      warnings: string[];
+    } | null = null;
+
+    try {
+      const systemType = mainBoardData.earthFaultSystem || "TN";
+      const sourceZsValue = parseFloat(mainBoardData.sourceZs || "0.15");
+      const earthResistanceValue = parseFloat(mainBoardData.earthResistance || "50");
+
+      const earthFaultCalc = calculateEarthFaultProtection({
+        systemType,
+        voltage: 400, // Hovedtavle er typisk 3-faset 400V
+        fuseType: mainBoardData.fuseType,
+        fuseSize: In,
+        segments: mainBoardData.segments.map(seg => ({
+          ...seg,
+          crossSection: chosenSize || seg.crossSection
+        })),
+        material: mainBoardData.material,
+        phase: "3-faset", // Hovedtavle er typisk 3-faset
+        sourceZs: sourceZsValue,
+        earthResistance: earthResistanceValue,
+        circuitType: "distribution" // Hovedtavle er distribution
+      });
+
+      earthFaultResults = {
+        Zs: earthFaultCalc.Zs,
+        Ia: earthFaultCalc.Ia,
+        meetsSafetyRequirement: earthFaultCalc.meetsSafetyRequirement,
+        rcdRequired: earthFaultCalc.rcdRequired,
+        warnings: earthFaultCalc.warnings
+      };
+
+      // === JORDFEJLSBESKYTTELSE ===
+      const jordfejlLines: string[] = [];
+      jordfejlLines.push("=== Jordfejlsbeskyttelse (DS 183) ===");
+      jordfejlLines.push(`Systemtype: ${systemType}${systemType === "TN" ? " (TN-C-S/TN-S)" : " (Egen jord)"}`);
+
+      if (systemType === "TN") {
+        jordfejlLines.push(`\nKildeimpedans: Zs,source = ${sourceZsValue.toFixed(3)} Ω`);
+        jordfejlLines.push(`Total sløjfeimpedans: Zs = ${earthFaultCalc.Zs?.toFixed(3)} Ω`);
+        jordfejlLines.push(`Jordfejlsstrøm: Ia = ${earthFaultCalc.Ia?.toFixed(1)} A`);
+        jordfejlLines.push(`\nSikring: ${mainBoardData.fuseType} ${In}A`);
+      } else {
+        jordfejlLines.push(`\nJordmodstand: Ra = ${earthResistanceValue.toFixed(1)} Ω`);
+        jordfejlLines.push(`Jordspyd typisk 6mm² Cu beskyttet`);
+        jordfejlLines.push(`Jordfejlsstrøm: Ia = ${earthFaultCalc.Ia?.toFixed(2)} A`);
+      }
+
+      // RCD krav
+      if (earthFaultCalc.rcdRequired === "30mA") {
+        jordfejlLines.push(`\n⚠️ HPFI påkrævet: 30 mA (Badeværelse/udendørs)`);
+      } else if (earthFaultCalc.rcdRequired === "300mA") {
+        jordfejlLines.push(`\n⚠️ HPFI påkrævet: 300 mA (Sikkerhedskrav ikke opfyldt)`);
+      } else {
+        jordfejlLines.push(`\n✓ HPFI ikke påkrævet (sikkerhedskrav opfyldt)`);
+      }
+
+      // Advarsler
+      if (earthFaultCalc.warnings.length > 0) {
+        jordfejlLines.push(`\n=== Advarsler ===`);
+        earthFaultCalc.warnings.forEach(w => jordfejlLines.push(w));
+      }
+
+      jordfejlLines.push(`\n${earthFaultCalc.meetsSafetyRequirement ? '✓ Jordfejlsbeskyttelse OK' : '✗ Jordfejlsbeskyttelse IKKE OK'}`);
+
+      steps.push({
+        category: "kortslutning",
+        formula: "Jordfejlsbeskyttelse",
+        variables: jordfejlLines.join("\n"),
+        calculation: "",
+        result: earthFaultCalc.meetsSafetyRequirement ? `✓ Jordfejlsbeskyttelse OK` : `✗ Jordfejlsbeskyttelse IKKE OK`
+      });
+    } catch (error) {
+      console.error("Fejl i jordfejlsberegninger:", error);
+    }
+
+    // Calculate earth conductor size based on the chosen cable size
+    const earthConductorSize = chosenSize
+      ? calculateMinimumEarthConductorSize(
+          chosenSize,
+          mainBoardData.material,
+          mainBoardData.segments[0]?.cableType || "single-core",
+          mainBoardData.earthFaultSystem,
+          "distribution"
+        )
+      : null;
+
     setResults({
       chosenSize,
+      earthConductorSize,
       totalCurrent: In,
       totalLength,
       totalVoltageDrop,
@@ -661,6 +824,9 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
       faultWarning,
       tripTime,
       fuseUnavailableWarning,
+      recommendedIndividualFuseSize,
+      individualCableCurrent,
+      earthFault: earthFaultResults,
     });
     
     // Add detailed logs to mellemregninger
@@ -899,6 +1065,66 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
             </div>
           </div>
 
+          {/* Earth Fault Protection Settings */}
+          <Card className="border-blue-200 bg-blue-50/50">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Jordfejlsbeskyttelse (DS 183)</CardTitle>
+              <CardDescription className="text-xs">
+                {mainBoardData.earthFaultSystem === "TT"
+                  ? "TT-system: Typisk for parcelhuse med jordspyd (6mm² Cu)"
+                  : "TN-system: Typisk for større bygninger med PE-leder"}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="space-y-1">
+                  <Label>Jordsystem</Label>
+                  <Select
+                    value={mainBoardData.earthFaultSystem || "TN"}
+                    onValueChange={(value: "TN" | "TT") => setMainBoardData({ ...mainBoardData, earthFaultSystem: value })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="TN">TN (PE-leder - stor bygning)</SelectItem>
+                      <SelectItem value="TT">TT (Jordspyd - parcelhus)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {mainBoardData.earthFaultSystem === "TN" && (
+                  <div className="space-y-1">
+                    <Label>Kildeimpedans Zs [Ω]</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={mainBoardData.sourceZs || "0.15"}
+                      onChange={(e) => setMainBoardData({ ...mainBoardData, sourceZs: e.target.value })}
+                      placeholder="0.15"
+                    />
+                  </div>
+                )}
+
+                {mainBoardData.earthFaultSystem === "TT" && (
+                  <div className="space-y-1">
+                    <Label>Jordmodstand Ra [Ω]</Label>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={mainBoardData.earthResistance || "50"}
+                      onChange={(e) => setMainBoardData({ ...mainBoardData, earthResistance: e.target.value })}
+                      placeholder="50"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Jordspyd typisk 6mm² Cu beskyttet
+                    </p>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Segments */}
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -923,6 +1149,9 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                   onChange={(data) => updateSegment(idx, data)}
                   phases="3-faset"
                   disableCrossSection={mainBoardData.autoSize}
+                  material={mainBoardData.material}
+                  earthSystem={mainBoardData.earthFaultSystem}
+                  circuitType="distribution"
                 />
               </div>
             ))}
@@ -952,11 +1181,17 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
               </Alert>
             )}
 
-            {/* Top Row: 3-column grid */}
-            <div className="grid grid-cols-3 gap-8">
+            {/* Top Row: 4-column grid */}
+            <div className="grid grid-cols-4 gap-6">
               <div>
                 <div className="text-xs text-muted-foreground mb-1">Enkelt kabel tværsnit</div>
                 <div className="text-xl font-bold">{results.chosenSize} mm²</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground mb-1">Jordleder [mm²]</div>
+                <div className="text-xl font-bold text-green-600">
+                  {results.earthConductorSize} mm²
+                </div>
               </div>
               <div>
                 <div className="text-xs text-muted-foreground mb-1">Total strøm</div>
@@ -1027,7 +1262,7 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
             {parseInt(mainBoardData.parallelCables) > 1 && (
               <div className={`mt-6 p-4 rounded-lg ${results.faultWarning ? 'bg-orange-100 dark:bg-orange-950/40 border border-orange-300' : 'bg-blue-50 dark:bg-blue-950/20 border border-blue-200'}`}>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold">Fejl i 1 leder (worst case)</span>
+                  <span className="text-xs font-semibold">Ik,min ved fejl i 1 leder (worst case)</span>
                   {results.faultWarning && <span className="text-lg">⚠️</span>}
                 </div>
                 <div className={`text-xl font-bold ${results.faultWarning ? 'text-orange-600' : 'text-blue-600'}`}>
@@ -1037,6 +1272,12 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
                   <div className={results.faultWarning ? 'text-orange-700 dark:text-orange-300 font-medium' : 'text-muted-foreground'}>
                     ↓ {((1 - results.IkMinFault / results.IkMin) * 100).toFixed(0)}% reduktion
                     (kun {parseInt(mainBoardData.parallelCables) - 1} kabler virker)
+                  </div>
+                  <div className="mt-2 text-muted-foreground">
+                    {results.faultWarning
+                      ? "Strømmen er muligvis for lav til at udløse beskyttelsen i tide"
+                      : "Verificer stadig at individuelle ledere er beskyttet"
+                    }
                   </div>
                 </div>
               </div>
@@ -1050,14 +1291,214 @@ export function MainBoardTab({ apartments, onAddLog }: MainBoardTabProps) {
               </Alert>
             )}
 
-            {results.faultWarning && (
-              <Alert className="mt-6 border-orange-500 bg-orange-50 dark:bg-orange-950/20">
-                <AlertDescription className="text-sm text-orange-900 dark:text-orange-100">
-                  <strong>Advarsel:</strong> Ved fejl i én parallel leder falder Ik,min fra {results.IkMin.toFixed(0)} A til {results.IkMinFault.toFixed(0)} A.
-                  Kontroller at sikringen stadig udløser tilstrækkeligt hurtigt ved denne lavere kortslutningsstrøm.
+            {/* Always show info about parallel cables protection requirements */}
+            {parseInt(mainBoardData.parallelCables) > 1 && (
+              <Alert className={`mt-6 ${results.faultWarning ? 'border-orange-500 bg-orange-50 dark:bg-orange-950/20' : 'border-blue-500 bg-blue-50 dark:bg-blue-950/20'}`}>
+                <AlertCircle className={`h-4 w-4 ${results.faultWarning ? 'text-orange-600' : 'text-blue-600'}`} />
+                <AlertDescription className={`text-sm ${results.faultWarning ? 'text-orange-900 dark:text-orange-100' : 'text-blue-900 dark:text-blue-100'}`}>
+                  <div className="space-y-3">
+                    <div>
+                      <strong>{results.faultWarning ? '⚠ Advarsel' : 'ℹ Information'}: Kortslutningsbeskyttelse af parallelforbundne ledere</strong>
+                    </div>
+                    <div>
+                      Ved fejl i én parallel leder falder Ik,min fra {results.IkMin.toFixed(0)} A til {results.IkMinFault.toFixed(0)} A
+                      (reduktion på {((1 - results.IkMinFault / results.IkMin) * 100).toFixed(0)}%).
+                      {results.faultWarning
+                        ? ' Hovedsikringen alene kan ikke nødvendigvis beskytte de individuelle ledere effektivt.'
+                        : ' Verificer at beskyttelsen stadig er tilstrækkelig ved denne reducerede strøm.'
+                      }
+                    </div>
+                    <div className={`border-l-4 ${results.faultWarning ? 'border-orange-400 bg-orange-100/50 dark:bg-orange-900/20' : 'border-blue-400 bg-blue-100/50 dark:bg-blue-900/20'} pl-3 py-2`}>
+                      <div className="font-semibold mb-1">Anbefaling (IEC 60364-4-43, A.3):</div>
+                      <ul className="list-disc list-inside space-y-1 text-xs">
+                        <li>Installer individuelle sikringer for hver parallel leder i forsyningsenden</li>
+                        <li>Overvej beskyttelse i både forsynings- og belastningsenden</li>
+                        <li>Alternativt: forbundne beskyttelsesudstyrer i forsyningsenden</li>
+                        <li>Verificer at beskyttelsen udløser ved Ik,min = {results.IkMinFault.toFixed(0)} A inden for 0,4s (DS 183, tabel 52.A)</li>
+                      </ul>
+                    </div>
+                    <div className="text-xs italic">
+                      Individuelle sikringer sikrer, at selv ved fejl i én enkelt leder, vil strømmen gennem denne
+                      leder være tilstrækkelig til at udløse beskyttelsen inden for den krævede tid.
+                      Se IEC 60364-4-43 Appendix A.3, figur A.3 og A.4.
+                    </div>
+
+                    {/* Recommended individual fuse sizes and diagram */}
+                    {results.recommendedIndividualFuseSize && results.individualCableCurrent && (
+                      <div className="mt-4 p-3 bg-white dark:bg-gray-900 rounded border border-gray-300 dark:border-gray-700">
+                        <div className="font-semibold text-sm mb-2">💡 Anbefalet opsætning:</div>
+                        <div className="grid grid-cols-2 gap-4 mb-3">
+                          <div>
+                            <div className="text-xs text-muted-foreground">Strøm per kabel:</div>
+                            <div className="text-lg font-bold">{results.individualCableCurrent.toFixed(1)} A</div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground">Anbefalet sikring per kabel:</div>
+                            <div className="text-lg font-bold text-green-600">{results.recommendedIndividualFuseSize} A</div>
+                          </div>
+                        </div>
+
+                        <div className="mb-3 p-2 bg-blue-50 dark:bg-blue-950/30 rounded text-xs">
+                          <strong>ℹ Note:</strong> Med individuelle sikringer er hovedsikringen <strong>ikke strengt nødvendig</strong> for
+                          kortslutningsbeskyttelse af kablerne. Hovedsikringen kan dog stadig være relevant for:
+                          <ul className="list-disc list-inside ml-2 mt-1">
+                            <li>Overbelastningsbeskyttelse af forsyningen</li>
+                            <li>Selektivitet (backup-beskyttelse)</li>
+                            <li>Krav fra forsyningsselskabet</li>
+                          </ul>
+                        </div>
+
+                        {/* SVG Diagram */}
+                        <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded">
+                          <svg viewBox="0 0 600 400" className="w-full h-auto">
+                            {/* Title */}
+                            <text x="300" y="30" textAnchor="middle" className="fill-current text-sm font-semibold">
+                              Opsætning med individuelle sikringer
+                            </text>
+
+                            {/* Supply */}
+                            <text x="50" y="120" textAnchor="middle" className="fill-current text-xs">Forsyning</text>
+                            <circle cx="50" cy="140" r="15" className="fill-blue-500" />
+
+                            {/* Main fuse - shown with dashed outline to indicate optional */}
+                            <line x1="65" y1="140" x2="120" y2="140" className="stroke-current stroke-2 opacity-50" strokeDasharray="4 2" />
+                            <rect x="120" y="125" width="40" height="30" className="fill-red-500 stroke-current stroke-2 opacity-50" strokeDasharray="4 2" />
+                            <text x="140" y="145" textAnchor="middle" className="fill-white text-xs font-bold opacity-70">
+                              {mainBoardData.fuseRating}A
+                            </text>
+                            <text x="140" y="115" textAnchor="middle" className="fill-current text-xs opacity-70">Hovedsikring</text>
+                            <text x="140" y="170" textAnchor="middle" className="fill-current text-xs italic opacity-70">(valgfri)</text>
+
+                            {/* Distribution point */}
+                            <line x1="160" y1="140" x2="220" y2="140" className="stroke-current stroke-2" />
+                            <circle cx="220" cy="140" r="8" className="fill-gray-400 stroke-current stroke-2" />
+
+                            {/* Parallel cables with individual fuses */}
+                            {Array.from({ length: parseInt(mainBoardData.parallelCables) }, (_, i) => {
+                              const nCables = parseInt(mainBoardData.parallelCables);
+                              const maxSpacing = 180;
+                              const spacing = Math.min(maxSpacing / Math.max(nCables - 1, 1), 80);
+                              const yPos = 140 + (i - (nCables - 1) / 2) * spacing;
+                              const cableNum = i + 1;
+
+                              return (
+                                <g key={i}>
+                                  {/* Line from distribution to individual fuse */}
+                                  <line x1="220" y1="140" x2="280" y2={yPos} className="stroke-current stroke-2" />
+
+                                  {/* Individual fuse */}
+                                  <rect x="280" y={yPos - 15} width="35" height="30" className="fill-orange-500 stroke-current stroke-2" />
+                                  <text x="297.5" y={yPos + 5} textAnchor="middle" className="fill-white text-xs font-bold">
+                                    {results.recommendedIndividualFuseSize}A
+                                  </text>
+
+                                  {/* Cable */}
+                                  <line x1="315" y1={yPos} x2="450" y2={yPos} className="stroke-current stroke-3" />
+                                  <text x="382.5" y={yPos - 5} textAnchor="middle" className="fill-current text-xs">
+                                    Kabel {cableNum}
+                                  </text>
+                                  <text x="382.5" y={yPos + 15} textAnchor="middle" className="fill-current text-xs font-semibold">
+                                    {results.chosenSize}mm²
+                                  </text>
+
+                                  {/* Line from cable end to load connection point */}
+                                  <line x1="450" y1={yPos} x2="450" y2="140" className="stroke-current stroke-2" />
+                                </g>
+                              );
+                            })}
+
+                            {/* Load connection point */}
+                            <circle cx="450" cy="140" r="8" className="fill-gray-400 stroke-current stroke-2" />
+
+                            {/* Load */}
+                            <line x1="458" y1="140" x2="500" y2="140" className="stroke-current stroke-2" />
+                            <circle cx="530" cy="140" r="20" className="fill-green-500 stroke-current stroke-2" />
+                            <text x="530" y="145" textAnchor="middle" className="fill-white text-xs font-bold">Last</text>
+                            <text x="530" y="175" textAnchor="middle" className="fill-current text-xs">
+                              {results.totalCurrent.toFixed(0)} A
+                            </text>
+                          </svg>
+                        </div>
+
+                        <div className="mt-2 text-xs space-y-1">
+                          <div className="text-muted-foreground">
+                            <strong>✓ Vigtigt:</strong> Individuelle sikringer skal monteres i forsyningsenden af hver parallel leder.
+                          </div>
+                          <div className="text-muted-foreground">
+                            <strong>✓ Verificer:</strong> At {results.recommendedIndividualFuseSize}A sikringen kan udløse ved Ik,min = {results.IkMinFault.toFixed(0)} A inden for 0,4s.
+                          </div>
+                          <div className="text-green-700 dark:text-green-400 font-medium">
+                            <strong>→ Resultat:</strong> Med individuelle {results.recommendedIndividualFuseSize}A sikringer behøver du ikke hovedsikringen for kortslutningsbeskyttelse af kablerne.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </AlertDescription>
               </Alert>
             )}
+
+            {/* Earth Fault Protection Results */}
+            {results.earthFault && (
+              <div className="mt-6 pt-6 border-t">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-semibold">Jordfejlsbeskyttelse</div>
+                  {results.earthFault.meetsSafetyRequirement ? (
+                    <Badge variant="default" className="bg-green-500">✓ OK</Badge>
+                  ) : (
+                    <Badge variant="destructive">✗ IKKE OK</Badge>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-3">
+                  {results.earthFault.Zs !== undefined && (
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-muted-foreground">Sløjfeimpedans Zs:</div>
+                      <div className="text-sm font-bold">{results.earthFault.Zs.toFixed(3)} Ω</div>
+                    </div>
+                  )}
+
+                  {results.earthFault.Ia !== undefined && (
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-muted-foreground">Jordfejlsstrøm Ia:</div>
+                      <div className="text-sm font-bold">{results.earthFault.Ia.toFixed(1)} A</div>
+                    </div>
+                  )}
+
+                  {results.earthFault.rcdRequired && results.earthFault.rcdRequired !== "none" && (
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-muted-foreground">HPFI krav:</div>
+                      <Badge variant="outline" className="text-xs">{results.earthFault.rcdRequired}</Badge>
+                    </div>
+                  )}
+                </div>
+
+                {results.earthFault.warnings.length > 0 && (
+                  <div className="mt-3 space-y-1">
+                    {results.earthFault.warnings.map((warning, idx) => (
+                      <div key={idx} className="text-xs text-amber-600 dark:text-amber-400">
+                        {warning}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Fuse curve chart */}
+            <div className="mt-6 pt-6 border-t">
+              <div className="text-sm font-semibold mb-2">Sikringskurver</div>
+              <div className="text-xs text-muted-foreground mb-3">
+                {mainBoardData.fuseType} med {mainBoardData.fuseRating}A fremhævet, Ik,min = {results.IkMin.toFixed(1)} A
+              </div>
+              <MultiFuseCurveChart
+                manufacturer="Standard"
+                fuseType={mainBoardData.fuseType}
+                selectedFuseSize={parseFloat(mainBoardData.fuseRating)}
+                highlightCurrent={results.IkMin}
+                highlightLabel={`Ik,min = ${results.IkMin.toFixed(1)} A`}
+              />
+            </div>
           </CardContent>
         </Card>
       )}

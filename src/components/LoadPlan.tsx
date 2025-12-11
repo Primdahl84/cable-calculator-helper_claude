@@ -2,8 +2,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Download, AlertCircle } from "lucide-react";
 
+interface GroupDataForLoadPlan {
+  name: string;
+  totalLength?: number;
+  description?: string;
+  phase: "1-faset" | "3-faset";
+  selectedPhase?: "L1" | "L2" | "L3";
+  fuseRating?: string;
+  In?: string;
+}
+
 interface LoadPlanProps {
-  groupsData?: any[];
+  groupsData?: GroupDataForLoadPlan[];
 }
 
 export function LoadPlan({ groupsData = [] }: LoadPlanProps) {

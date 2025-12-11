@@ -10,6 +10,7 @@ import { ApartmentsTab } from "./ApartmentsTab";
 import { MainBoardTab } from "./MainBoardTab";
 import { useProject } from "@/contexts/ProjectContext";
 import type { ProjectType } from "@/types/project";
+import type { ApartmentData } from "./ApartmentDetailView";
 
 export interface CalculationStep {
   category: 'overbelastning' | 'kortslutning' | 'spændingsfald' | 'effektberegning';
@@ -35,10 +36,10 @@ export function CableCalculator() {
   const showApartmentsTab = projectType === "lejlighed" || projectType === "blandet";
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [serviceData, setServiceData] = useState<any>(null);
-  const [groupsData, setGroupsData] = useState<any[]>([]);
+  const [serviceData, setServiceData] = useState<Record<string, unknown> | null>(null);
+  const [groupsData, setGroupsData] = useState<Record<string, unknown>[]>([]);
   const [serviceCableMethod, setServiceCableMethod] = useState<string>("individual");
-  const [apartments, setApartments] = useState<any[]>([]);
+  const [apartments, setApartments] = useState<ApartmentData[]>([]);
   const [sharedServiceCables, setSharedServiceCables] = useState<Array<{id: string; name: string; diversityFactor: string}>>([]);
 
   // Load saved data from localStorage on mount
@@ -60,7 +61,7 @@ export function CableCalculator() {
     if (savedServiceResults) {
       try {
         const results = JSON.parse(savedServiceResults);
-        setServiceData((prev: any) => ({ ...prev, ...results }));
+        setServiceData((prev) => ({ ...prev, ...results }));
       } catch (e) {
         console.error("Failed to parse service results:", e);
       }
@@ -106,7 +107,7 @@ export function CableCalculator() {
       if (savedServiceResults) {
         try {
           const results = JSON.parse(savedServiceResults);
-          setServiceData((prev: any) => ({ ...prev, ...results }));
+          setServiceData((prev) => ({ ...prev, ...results }));
         } catch (e) {
           console.error("Failed to parse service results:", e);
         }
@@ -167,7 +168,7 @@ export function CableCalculator() {
   const individualServiceCableUnits = apartments.filter(apt => !apt.sharedServiceCableId);
   
   // Get units grouped by shared service cable
-  const unitsBySharedCable: Record<string, any[]> = {};
+  const unitsBySharedCable: Record<string, ApartmentData[]> = {};
   sharedServiceCables.forEach(cable => {
     unitsBySharedCable[cable.id] = apartments.filter(apt => apt.sharedServiceCableId === cable.id);
   });
@@ -237,27 +238,12 @@ export function CableCalculator() {
             </TabsContent>
           )}
 
-          {(!showApartmentsTab || showSharedServiceCable) && sharedServiceCables.map(cable => (
-            <TabsContent key={cable.id} value={`service-${cable.id}`} className="space-y-4">
-              <ApartmentsTab filterServiceCableId={cable.id} onAddLog={addLog} />
-              <ServiceCableTab addLog={addLog} />
-            </TabsContent>
-          ))}
-
           {/* Service cable tab for regular projects */}
           {!showApartmentsTab && (
             <TabsContent value="service" className="space-y-4">
               <ServiceCableTab addLog={addLog} />
             </TabsContent>
           )}
-
-          {/* Individual service cable tabs for units */}
-          {showApartmentsTab && individualServiceCableUnits.map(apt => (
-            <TabsContent key={apt.id} value={`service-${apt.id}`} className="space-y-4">
-              <ApartmentsTab filterServiceCableId={null} onAddLog={addLog} />
-              <ServiceCableTab addLog={addLog} />
-            </TabsContent>
-          ))}
 
           {!showApartmentsTab && (
             <TabsContent value="groups" className="space-y-4">

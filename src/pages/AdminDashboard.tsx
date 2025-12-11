@@ -90,10 +90,10 @@ const AdminDashboard = () => {
       setNewUserPassword("");
       setNewUserName("");
       loadUsers();
-    } catch (error: any) {
+    } catch (error) {
       toast({
         title: "Fejl ved oprettelse",
-        description: error.message,
+        description: error instanceof Error ? error.message : "Ukendt fejl",
         variant: "destructive",
       });
     }
@@ -121,10 +121,10 @@ const AdminDashboard = () => {
       });
 
       loadUsers();
-    } catch (error: any) {
+    } catch (error) {
       toast({
         title: "Fejl",
-        description: error.message,
+        description: error instanceof Error ? error.message : "Ukendt fejl",
         variant: "destructive",
       });
     }
@@ -145,10 +145,10 @@ const AdminDashboard = () => {
       });
 
       loadUsers();
-    } catch (error: any) {
+    } catch (error) {
       toast({
         title: "Fejl ved sletning",
-        description: error.message,
+        description: error instanceof Error ? error.message : "Ukendt fejl",
         variant: "destructive",
       });
     }

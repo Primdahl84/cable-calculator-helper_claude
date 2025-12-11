@@ -1,15 +1,23 @@
-export function getFuseTime(series: any, size: number, Ik: number) {
+interface CurvePoint {
+  I: number;
+  t: number;
+}
+
+type CurveData = CurvePoint[] | [number, number][];
+type FuseSeries = Record<number, CurveData>;
+
+export function getFuseTime(series: FuseSeries, size: number, Ik: number) {
   const curve = series[size];
   if (!curve) return null;
   if (!Array.isArray(curve) || curve.length < 2) return null;
 
   // Check if curve uses {I, t} format or [I, t] format
   const isObjectFormat = curve[0] && typeof curve[0] === 'object' && 'I' in curve[0];
-  
+
   // Convert to normalized format for easier processing
-  const normalizedCurve = isObjectFormat 
-    ? curve.map((p: any) => ({ I: p.I, t: p.t }))
-    : curve.map((p: any) => ({ I: p[0], t: p[1] }));
+  const normalizedCurve: CurvePoint[] = isObjectFormat
+    ? (curve as CurvePoint[]).map((p) => ({ I: p.I, t: p.t }))
+    : (curve as [number, number][]).map((p) => ({ I: p[0], t: p[1] }));
 
   // Assume curve sorted by I ascending
   for (let i = 0; i < normalizedCurve.length - 1; i++) {

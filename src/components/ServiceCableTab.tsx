@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Calculator, Plus, Trash2 } from "lucide-react";
 import { SegmentInput } from "./SegmentInput";
+import { MultiFuseCurveChart } from "./MultiFuseCurveChart";
 import type { SegmentData } from "@/lib/calculations";
 import {
   lookupIz,
@@ -20,6 +21,8 @@ import {
   calculateReducedNeutral,
   calculateNetworkImpedance,
   addComplexCurrents,
+  calculateEarthFaultProtection,
+  calculateMinimumEarthConductorSize,
 } from "@/lib/calculations";
 import { toast } from "sonner";
 import { Badge } from "./ui/badge";
@@ -334,12 +337,53 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     return "Standard";
   });
 
+  // Earth Fault Protection settings
+  // For parcelhuse: Default TT-system (jordspyd)
+  const [earthFaultSystem, setEarthFaultSystem] = useState<"TN" | "TT">(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.earthFaultSystem || "TT"; // TT er standard for parcelhuse
+      } catch {
+        return "TT";
+      }
+    }
+    return "TT";
+  });
+
+  const [sourceZs, setSourceZs] = useState(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.sourceZs || "0.15";
+      } catch {
+        return "0.15";
+      }
+    }
+    return "0.15";
+  });
+
+  const [earthResistance, setEarthResistance] = useState(() => {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.earthResistance || "50"; // Typisk Ra for jordspyd
+      } catch {
+        return "50";
+      }
+    }
+    return "50";
+  });
+
   const [segments, setSegments] = useState<SegmentData[]>(() => {
     const saved = localStorage.getItem(storageKey);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        return parsed.segments || [
+        const segments = parsed.segments || [
           {
             installMethod: "C",
             length: 21,
@@ -349,8 +393,16 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
             cablesGrouped: 1,
             kt: 1.0,
             kgrp: 1.0,
+            insulationType: "XLPE",
+            cableType: "single-core",
           },
         ];
+        // Ensure all segments have insulationType and cableType set (migration for old data)
+        return segments.map((seg: SegmentData) => ({
+          ...seg,
+          insulationType: seg.insulationType || "XLPE",
+          cableType: seg.cableType || "single-core",
+        }));
       } catch {
         return [
           {
@@ -362,6 +414,8 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
             cablesGrouped: 1,
             kt: 1.0,
             kgrp: 1.0,
+            insulationType: "XLPE",
+            cableType: "single-core",
           },
         ];
       }
@@ -376,6 +430,8 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
         cablesGrouped: 1,
         kt: 1.0,
         kgrp: 1.0,
+        insulationType: "XLPE",
+        cableType: "single-core",
       },
     ];
   });
@@ -403,9 +459,14 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
       U_trafo,
       Ek_percent,
       P_cu,
+      earthFaultSystem,
+      sourceZs,
+      earthResistance,
+      updatedAt: Date.now(),
     };
     localStorage.setItem(storageKey, JSON.stringify(state));
   }, [
+    storageKey,
     fuseType,
     fuseRating,
     sourceVoltage,
@@ -426,6 +487,9 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     U_trafo,
     Ek_percent,
     P_cu,
+    earthFaultSystem,
+    sourceZs,
+    earthResistance,
   ]);
 
   // Auto-update k-value when material changes
@@ -471,6 +535,9 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
       kValue,
       tripTime,
       fuseManufacturer,
+      earthFaultSystem,
+      sourceZs,
+      earthResistance,
       segments: segments.map(s => ({
         installMethod: s.installMethod,
         length: s.length,
@@ -491,8 +558,9 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     const timer = setTimeout(() => {
       calculate();
     }, 300);
-    
+
     return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     fuseType,
     fuseRating,
@@ -509,6 +577,10 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     tripTime,
     fuseManufacturer,
     segments,
+    earthFaultSystem,
+    sourceZs,
+    earthResistance,
+    // calculate not included to avoid infinite loop - it's stable enough
   ]);
 
   // Initial calculation on mount
@@ -517,7 +589,8 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
       hasCalculatedOnceRef.current = true;
       setTimeout(() => calculate(), 100);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   // Resultater
   const [results, setResults] = useState<{
@@ -536,6 +609,13 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
     tripTime: number;
     ZkabelMin?: { R: number; X: number };
     ZkabelMax?: { R: number; X: number };
+    earthFault?: {
+      Zs?: number;
+      Ia?: number;
+      meetsSafetyRequirement: boolean;
+      rcdRequired?: "30mA" | "300mA" | "none";
+      warnings: string[];
+    } | null;
   } | null>(null);
 
   // Save calculation results to localStorage so GroupsTab can access them
@@ -545,8 +625,15 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
         ...results,
         ikTrafo,
         cosTrafo,
+        updatedAt: Date.now(),
       };
       localStorage.setItem(`${storageKey}-results`, JSON.stringify(resultsState));
+      // Notify other tabs/views that service cable results were updated (same-tab CustomEvent)
+      window.dispatchEvent(
+        new CustomEvent("service-results-updated", {
+          detail: { key: `${storageKey}-results`, updatedAt: resultsState.updatedAt },
+        })
+      );
     }
   }, [results, ikTrafo, cosTrafo, storageKey]);
 
@@ -746,8 +833,21 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
           chosenSize = size;
           // Opdater alle segmenter med det valgte tværsnit hvis det faktisk er anderledes
           setSegments((prev) => {
-            const updated = prev.map(seg => ({ ...seg, crossSection: size }));
-            const hasChanged = updated.some((s, i) => s.crossSection !== prev[i].crossSection);
+            const updated = prev.map(seg => {
+              // Beregn ny jordleder størrelse baseret på nyt tværsnit
+              const newEarthSize = calculateMinimumEarthConductorSize(
+                size,
+                material,
+                seg.cableType || "single-core",
+                earthFaultSystem,
+                "distribution"
+              );
+              return { ...seg, crossSection: size, earthConductorSize: newEarthSize };
+            });
+            const hasChanged = updated.some((s, i) =>
+              s.crossSection !== prev[i].crossSection ||
+              s.earthConductorSize !== prev[i].earthConductorSize
+            );
             return hasChanged ? updated : prev;
           });
           break;
@@ -956,6 +1056,88 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
         result: `${duVolt.toFixed(2)} V (${totalVoltageDropPercent.toFixed(2)}% ≤ ${maxDrop.toFixed(2)}%)`,
       });
 
+      // JORDFEJLSBESKYTTELSE (EARTH FAULT PROTECTION)
+      let earthFaultResults: {
+        Zs?: number;
+        Ia?: number;
+        meetsSafetyRequirement: boolean;
+        rcdRequired?: "30mA" | "300mA" | "none";
+        warnings: string[];
+      } | null = null;
+
+      try {
+        const systemType = earthFaultSystem;
+        const sourceZsValue = parseFloat(sourceZs);
+        const earthResistanceValue = parseFloat(earthResistance);
+
+        const earthFaultCalc = calculateEarthFaultProtection({
+          systemType,
+          voltage,
+          fuseType: actualFuseType,
+          fuseSize: In,
+          segments: segments.map(seg => ({
+            ...seg,
+            crossSection: chosenSize || seg.crossSection
+          })),
+          material,
+          phase: phases,
+          sourceZs: sourceZsValue,
+          earthResistance: earthResistanceValue,
+          circuitType: "distribution" // Stikledning er distribution
+        });
+
+        earthFaultResults = {
+          Zs: earthFaultCalc.Zs,
+          Ia: earthFaultCalc.Ia,
+          meetsSafetyRequirement: earthFaultCalc.meetsSafetyRequirement,
+          rcdRequired: earthFaultCalc.rcdRequired,
+          warnings: earthFaultCalc.warnings
+        };
+
+        // === JORDFEJLSBESKYTTELSE ===
+        const jordfejlLines: string[] = [];
+        jordfejlLines.push("=== Jordfejlsbeskyttelse (DS 183) ===");
+        jordfejlLines.push(`Systemtype: ${systemType}${systemType === "TN" ? " (TN-C-S/TN-S)" : " (Egen jord)"}`);
+
+        if (systemType === "TN") {
+          jordfejlLines.push(`\nKildeimpedans: Zs,source = ${sourceZsValue.toFixed(3)} Ω`);
+          jordfejlLines.push(`Total sløjfeimpedans: Zs = ${earthFaultCalc.Zs?.toFixed(3)} Ω`);
+          jordfejlLines.push(`Jordfejlsstrøm: Ia = ${earthFaultCalc.Ia?.toFixed(1)} A`);
+          jordfejlLines.push(`\nSikring: ${actualFuseType} ${In}A`);
+        } else {
+          jordfejlLines.push(`\nJordmodstand: Ra = ${earthResistanceValue.toFixed(1)} Ω`);
+          jordfejlLines.push(`Jordspyd typisk 6mm² Cu beskyttet`);
+          jordfejlLines.push(`Jordfejlsstrøm: Ia = ${earthFaultCalc.Ia?.toFixed(2)} A`);
+        }
+
+        // RCD krav
+        if (earthFaultCalc.rcdRequired === "30mA") {
+          jordfejlLines.push(`\n⚠️ HPFI påkrævet: 30 mA (Badeværelse/udendørs)`);
+        } else if (earthFaultCalc.rcdRequired === "300mA") {
+          jordfejlLines.push(`\n⚠️ HPFI påkrævet: 300 mA (Sikkerhedskrav ikke opfyldt)`);
+        } else {
+          jordfejlLines.push(`\n✓ HPFI ikke påkrævet (sikkerhedskrav opfyldt)`);
+        }
+
+        // Advarsler
+        if (earthFaultCalc.warnings.length > 0) {
+          jordfejlLines.push(`\n=== Advarsler ===`);
+          earthFaultCalc.warnings.forEach(w => jordfejlLines.push(w));
+        }
+
+        jordfejlLines.push(`\n${earthFaultCalc.meetsSafetyRequirement ? '✓ Jordfejlsbeskyttelse OK' : '✗ Jordfejlsbeskyttelse IKKE OK'}`);
+
+        steps.push({
+          category: "kortslutning",
+          formula: "Jordfejlsbeskyttelse",
+          variables: jordfejlLines.join("\n"),
+          calculation: "",
+          result: earthFaultCalc.meetsSafetyRequirement ? `✓ Jordfejlsbeskyttelse OK` : `✗ Jordfejlsbeskyttelse IKKE OK`
+        });
+      } catch (error) {
+        console.error("Fejl i jordfejlsberegninger:", error);
+      }
+
       logs.push("[KORTSLUTNINGSBEREGNING]");
       logs.push(`Ik_min (ved tavle/måler) = ${formatCurrentWithAngle(IkMin, IkMinAngle)}`);
       logs.push(`Ik_max (tavle) = ${formatCurrentWithAngle(IkMax, IkMaxAngle)}`);
@@ -1004,7 +1186,25 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
         tripTime: tTrip,
         ZkabelMin: Zw1Min,
         ZkabelMax: Zw1Max,
+        earthFault: earthFaultResults,
       });
+
+      // Persist a lightweight summary of the latest calculation so other tabs can read the exact length/tværsnit
+      try {
+        const summary = {
+          totalLength,
+          chosenSize,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(`${storageKey}-results-latest`, JSON.stringify(summary));
+        window.dispatchEvent(
+          new CustomEvent("service-results-updated", {
+            detail: { key: `${storageKey}-results-latest`, updatedAt: summary.updatedAt },
+          })
+        );
+      } catch (e) {
+        console.warn("Could not persist service cable summary:", e);
+      }
 
       // Convert logs to steps format
       addLog("Stikledning – beregning", "service", steps);
@@ -1232,6 +1432,66 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
         </CardContent>
       </Card>
 
+      {/* Earth Fault Protection Settings */}
+      <Card className="border-blue-200 bg-blue-50/50">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Jordfejlsbeskyttelse (DS 183)</CardTitle>
+          <CardDescription className="text-xs">
+            {earthFaultSystem === "TT"
+              ? "TT-system: Typisk for parcelhuse med jordspyd (6mm² Cu)"
+              : "TN-system: Typisk for større bygninger med PE-leder"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="space-y-1">
+              <Label>Jordsystem</Label>
+              <Select
+                value={earthFaultSystem}
+                onValueChange={(value: "TN" | "TT") => setEarthFaultSystem(value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="TT">TT (Jordspyd - parcelhus)</SelectItem>
+                  <SelectItem value="TN">TN (PE-leder - stor bygning)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {earthFaultSystem === "TN" && (
+              <div className="space-y-1">
+                <Label>Kildeimpedans Zs [Ω]</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={sourceZs}
+                  onChange={(e) => setSourceZs(e.target.value)}
+                  placeholder="0.15"
+                />
+              </div>
+            )}
+
+            {earthFaultSystem === "TT" && (
+              <div className="space-y-1">
+                <Label>Jordmodstand Ra [Ω]</Label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  value={earthResistance}
+                  onChange={(e) => setEarthResistance(e.target.value)}
+                  placeholder="50"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Jordspyd typisk 6mm² Cu beskyttet
+                </p>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-base font-semibold">Kabel fremføringsmetode</h3>
@@ -1258,6 +1518,9 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
                 segment={segment}
                 onChange={(data) => updateSegment(index, data)}
                 phases={phases}
+                material={material}
+                earthSystem={earthFaultSystem}
+                circuitType="distribution"
               />
             </CardContent>
           </Card>
@@ -1325,6 +1588,68 @@ export function ServiceCableTab({ addLog }: ServiceCableTabProps) {
                 <div className="text-xs text-muted-foreground">Udkoblingstid t [s]</div>
                 <div className="text-lg font-bold">{results.tripTime.toFixed(4)}</div>
               </div>
+            </div>
+
+            {/* Earth Fault Protection Results */}
+            {results.earthFault && (
+              <div className="mt-4 pt-4 border-t">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-semibold">Jordfejlsbeskyttelse</div>
+                  {results.earthFault.meetsSafetyRequirement ? (
+                    <Badge variant="default" className="bg-green-500">✓ OK</Badge>
+                  ) : (
+                    <Badge variant="destructive">✗ IKKE OK</Badge>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-3">
+                  {results.earthFault.Zs !== undefined && (
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-muted-foreground">Sløjfeimpedans Zs:</div>
+                      <div className="text-sm font-bold">{results.earthFault.Zs.toFixed(3)} Ω</div>
+                    </div>
+                  )}
+
+                  {results.earthFault.Ia !== undefined && (
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-muted-foreground">Jordfejlsstrøm Ia:</div>
+                      <div className="text-sm font-bold">{results.earthFault.Ia.toFixed(1)} A</div>
+                    </div>
+                  )}
+
+                  {results.earthFault.rcdRequired && results.earthFault.rcdRequired !== "none" && (
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-muted-foreground">HPFI krav:</div>
+                      <Badge variant="outline" className="text-xs">{results.earthFault.rcdRequired}</Badge>
+                    </div>
+                  )}
+                </div>
+
+                {results.earthFault.warnings.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {results.earthFault.warnings.map((warning, idx) => (
+                      <div key={idx} className="text-xs text-amber-600 dark:text-amber-400">
+                        {warning}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Multi fuse curve chart - compact */}
+            <div className="mt-4 pt-4 border-t">
+              <div className="text-xs font-semibold mb-1">Sikringskurver</div>
+              <div className="text-xs text-muted-foreground mb-2">
+                {fuseType} med {fuseRating}A fremhævet, Ik,min = {results.IkMin.toFixed(1)} A
+              </div>
+              <MultiFuseCurveChart
+                manufacturer={fuseManufacturer}
+                fuseType={fuseType}
+                selectedFuseSize={parseFloat(fuseRating)}
+                highlightCurrent={results.IkMin}
+                highlightLabel={`Ik,min = ${results.IkMin.toFixed(1)} A`}
+              />
             </div>
           </CardContent>
         </Card>

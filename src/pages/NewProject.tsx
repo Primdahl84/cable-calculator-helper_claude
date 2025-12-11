@@ -59,7 +59,7 @@ const NewProject = () => {
   const [projectAddress, setProjectAddress] = useState("");
   const [sameAsCustomer, setSameAsCustomer] = useState(true);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!selectedType) {
@@ -87,9 +87,14 @@ const NewProject = () => {
       updatedAt: new Date().toISOString(),
     };
 
-    addProject(newProject);
-    toast.success("Projekt oprettet");
-    navigate("/calculations");
+    try {
+      await addProject(newProject);
+      toast.success("Projekt oprettet");
+      navigate("/calculations");
+    } catch (error) {
+      console.error("Error creating project:", error);
+      toast.error("Kunne ikke oprette projekt");
+    }
   };
 
   return (

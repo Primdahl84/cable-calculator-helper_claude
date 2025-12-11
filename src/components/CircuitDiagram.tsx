@@ -5,8 +5,8 @@ import { useState, useEffect } from "react";
 import { getCableColor, formatCurrent, formatLength, formatCrossSection } from "@/lib/circuitDiagram";
 
 interface CircuitDiagramProps {
-  serviceData?: any;
-  groupsData?: any[];
+  serviceData?: Record<string, unknown>;
+  groupsData?: Record<string, unknown>[];
 }
 
 export function CircuitDiagram({ serviceData, groupsData = [] }: CircuitDiagramProps) {

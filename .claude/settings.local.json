@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(git add:*)",
+      "Bash(npm run lint)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run dev:*)",
+      "Bash(grep:*)",
+      "Bash(echo:*)",
+      "Bash(rm:*)"
     ],
     "deny": [],
     "ask": []

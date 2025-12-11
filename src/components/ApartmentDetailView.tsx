@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Plus, Trash2, Edit2, Calculator } from "lucide-react";
@@ -24,6 +24,7 @@ import {
 } from "@/lib/calculations";
 import { autoSelectGroupCableSize } from "@/lib/groupCalculations";
 import { getFuseData, fuseTripTimeExplain } from "@/lib/fuseCurves";
+import { MultiFuseCurveChart } from "./MultiFuseCurveChart";
 
 // Helper to check if fuse type uses absolute Ik values instead of multiplier
 const usesAbsoluteIk = (fuseType?: string): boolean => {
@@ -132,6 +133,7 @@ const createDefaultSegment = (): SegmentData => ({
   kt: 1.0,
   kgrp: 1.0,
   insulationType: "XLPE",
+  cableType: "single-core",
 });
 
 const createDefaultGroup = (index: number, autoPhase?: "L1" | "L2" | "L3"): GroupData => ({
@@ -325,7 +327,7 @@ export function ApartmentDetailView({
     return basePower * (1 + extraPercent / 100);
   };
 
-  const calculateServiceCable = () => {
+  const calculateServiceCable = useCallback(() => {
     const calculationSteps: CalculationStep[] = [];
     
     try {
@@ -708,7 +710,7 @@ export function ApartmentDetailView({
       console.error("Service cable calculation error:", error);
       setServiceCableResults(null);
     }
-  };
+  }, [apartment, sharedServiceCables, onAddLog, onUpdate]);
 
   const power = calculateApartmentPower();
   const amps = power ? wattsToAmps(power, parseInt(apartment.voltage), apartment.phases, parseFloat(apartment.cosPhi.replace(",", "."))) : null;
@@ -730,30 +732,37 @@ export function ApartmentDetailView({
 
   // Auto-select fuse size has been disabled - users should manually select appropriate fuse size
   // based on the calculated total current displayed in the UI
-  
-  // Initialize service cable segments if missing
-  if (!apartment.serviceCableSegments || apartment.serviceCableSegments.length === 0) {
-    const loadedConductors = apartment.phases === "3-faset" ? 3 : 2;
-    onUpdate({
-      serviceCableSegments: [{
-        installMethod: "C",
-        length: 89,
-        ambientTemp: 30,
-        loadedConductors,
-        crossSection: 50,
-        cablesGrouped: 1,
-        kt: 1.0,
-        kgrp: 1.0,
-      }]
-    });
-  }
+
+  // Initialize service cable segments if missing (moved to useEffect to avoid render-time mutation)
+  useEffect(() => {
+    if (!apartment.serviceCableSegments || apartment.serviceCableSegments.length === 0) {
+      const loadedConductors = apartment.phases === "3-faset" ? 3 : 2;
+      onUpdate({
+        serviceCableSegments: [{
+          installMethod: "C",
+          length: 89,
+          ambientTemp: 30,
+          loadedConductors,
+          crossSection: 50,
+          cablesGrouped: 1,
+          kt: 1.0,
+          kgrp: 1.0,
+          insulationType: "XLPE",
+          cableType: "single-core",
+        }]
+      });
+    }
+  }, [apartment.serviceCableSegments, apartment.phases, onUpdate]);
 
   // Recalculate when service cable data changes
   useEffect(() => {
     calculateServiceCable();
   }, [
     apartment.serviceCable,
+    calculateServiceCable,
     // Only recalculate on segment changes if autoSize is true
+    // Note: Using spread for conditional dependency - intentional
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     ...(apartment.serviceCable?.autoSize ? [apartment.serviceCableSegments] : []),
     apartment.voltage,
     apartment.phases,
@@ -770,7 +779,7 @@ export function ApartmentDetailView({
   ]);
 
   // Beregn grupper med mellemregninger automatically
-  const calculateApartmentGroups = () => {
+  const calculateApartmentGroups = useCallback(() => {
     try {
       const allSteps: CalculationStep[][] = [];
       const newGroupResults: Record<string, {
@@ -996,7 +1005,7 @@ export function ApartmentDetailView({
     } catch (error) {
       console.error("Group calculation error:", error);
     }
-  };
+  }, [apartment, sharedServiceCables, onUpdate, onAddLog]);
 
   // Auto-calculate groups when they change
   useEffect(() => {
@@ -1029,7 +1038,8 @@ export function ApartmentDetailView({
     serviceCableResults,
     apartment.cosPhi,
     onAddLog,
-    onUpdate
+    onUpdate,
+    calculateApartmentGroups
   ]);
 
   return (
@@ -1881,6 +1891,32 @@ export function ApartmentDetailView({
                         </div>
                       )}
                     </div>
+
+                    {/* Fuse curve chart for service cable */}
+                    {(() => {
+                      const fuseType = apartment.sharedServiceCableId
+                        ? sharedServiceCables.find(c => c.id === apartment.sharedServiceCableId)?.fuseType || "Diazed gG"
+                        : apartment.serviceCable?.fuseType || "Diazed gG";
+                      const fuseRating = apartment.sharedServiceCableId
+                        ? sharedServiceCables.find(c => c.id === apartment.sharedServiceCableId)?.fuseRating || "35"
+                        : apartment.serviceCable?.fuseRating || "35";
+
+                      return (
+                        <div className="mt-6 pt-6 border-t">
+                          <div className="text-sm font-semibold mb-2">Sikringskurver</div>
+                          <div className="text-xs text-muted-foreground mb-3">
+                            {fuseType} med {fuseRating}A fremhævet, Ik,min = {serviceCableResults.IkMin.toFixed(1)} A
+                          </div>
+                          <MultiFuseCurveChart
+                            manufacturer="Standard"
+                            fuseType={fuseType}
+                            selectedFuseSize={parseFloat(fuseRating)}
+                            highlightCurrent={serviceCableResults.IkMin}
+                            highlightLabel={`Ik,min = ${serviceCableResults.IkMin.toFixed(1)} A`}
+                          />
+                        </div>
+                      );
+                    })()}
                   </CardContent>
                 </Card>
               )}

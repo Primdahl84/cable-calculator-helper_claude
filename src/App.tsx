@@ -9,6 +9,7 @@ import NewProject from "./pages/NewProject";
 import Calculations from "./pages/Calculations";
 import Auth from "./pages/Auth";
 import AdminDashboard from "./pages/AdminDashboard";
+import FuseCurveDemo from "./pages/FuseCurveDemo";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -26,6 +27,7 @@ const App = () => (
             <Route path="/new-project" element={<NewProject />} />
             <Route path="/calculations" element={<Calculations />} />
             <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/fuse-curves" element={<FuseCurveDemo />} />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
           </Routes>

@@ -2,9 +2,10 @@ import { useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Trash2, FileText } from "lucide-react";
+import { Trash2, FileText, Copy, ClipboardCopy } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
 import type { LogEntry, CalculationStep } from "./CableCalculator";
 
 interface CalculationLogProps {
@@ -26,20 +27,51 @@ const categoryColors = {
   effektberegning: 'bg-green-500/10 text-green-700 dark:text-green-300 border-green-500/20'
 };
 
+// Convert text to TI-Nspire CX compatible format
+const convertToTINspire = (text: string): string => {
+  return text
+    // Mathematical operators
+    .replace(/×/g, "*")
+    .replace(/·/g, "*")
+    .replace(/÷/g, "/")
+    .replace(/−/g, "-")
+
+    // Powers and roots
+    .replace(/²/g, "^2")
+    .replace(/³/g, "^3")
+    .replace(/√3/g, "√(3)")
+    .replace(/√\((\d+)\)/g, "√($1)")
+    .replace(/√([^\s\(])/g, "√($1)")
+    .replace(/√/g, "√")  // Keep √ symbol as TI-Nspire supports it
+
+    // Greek letters (TI-Nspire supports these)
+    .replace(/φ/g, "φ")
+    .replace(/Δ/g, "Δ")
+    .replace(/π/g, "π")
+
+    // Special formatting
+    .replace(/\s*∠\s*/g, "∠")  // Angle symbol
+    .replace(/\s*≤\s*/g, " ≤ ")
+    .replace(/\s*≥\s*/g, " ≥ ")
+    .replace(/\s*=\s*/g, " = ")
+
+    // Clean up multiple spaces
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
 const CalculationStepDisplay = ({ step }: { step: CalculationStep }) => {
   const categoryColor = categoryColors[step.category] || "bg-secondary";
   const categoryName = categoryLabels[step.category] || step.category;
 
-  const copyToClipboard = (text: string) => {
-    // Convert to TI-Nspire compatible format
-    const tiFormat = text
-      .replace(/√/g, "√(")
-      .replace(/×/g, "*")
-      .replace(/÷/g, "/")
-      .replace(/²/g, "^2")
-      .replace(/³/g, "^3");
-    
-    navigator.clipboard.writeText(tiFormat);
+  const copyToClipboard = async (text: string) => {
+    const tiFormat = convertToTINspire(text);
+    try {
+      await navigator.clipboard.writeText(tiFormat);
+      toast.success("Kopieret til clipboard (TI-Nspire format)");
+    } catch (error) {
+      toast.error("Kunne ikke kopiere til clipboard");
+    }
   };
 
   return (
@@ -63,11 +95,32 @@ const CalculationStepDisplay = ({ step }: { step: CalculationStep }) => {
               onClick={() => copyToClipboard(step.variables)}
               className="h-6 px-2 text-xs"
             >
+              <Copy className="h-3 w-3 mr-1" />
               Kopier
             </Button>
           </div>
           <div className="font-mono text-xs bg-background/50 p-3 rounded border border-border/30 whitespace-pre-wrap leading-relaxed">
             {step.variables}
+          </div>
+        </div>
+      )}
+
+      {step.calculation && (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-xs font-medium text-muted-foreground">Beregning:</div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => copyToClipboard(step.calculation)}
+              className="h-6 px-2 text-xs"
+            >
+              <Copy className="h-3 w-3 mr-1" />
+              Kopier
+            </Button>
+          </div>
+          <div className="font-mono text-xs bg-background/50 p-3 rounded border border-border/30 whitespace-pre-wrap leading-relaxed">
+            {step.calculation}
           </div>
         </div>
       )}
@@ -86,6 +139,53 @@ const CalculationStepDisplay = ({ step }: { step: CalculationStep }) => {
 
 export function CalculationLog({ logs, onClear }: CalculationLogProps) {
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
+
+  // Copy all calculations for a log entry to clipboard
+  const copyAllCalculations = async (log: LogEntry) => {
+    const sections: string[] = [];
+
+    sections.push(`=== ${log.title} ===`);
+    sections.push(`Tidspunkt: ${log.timestamp.toLocaleTimeString()} - ${log.timestamp.toLocaleDateString()}`);
+    sections.push("");
+
+    log.steps.forEach((step, idx) => {
+      sections.push(`--- ${categoryLabels[step.category] || step.category} ---`);
+
+      if (step.formula) {
+        sections.push(`Formel: ${step.formula}`);
+      }
+
+      if (step.variables) {
+        sections.push("");
+        sections.push("Værdier:");
+        sections.push(convertToTINspire(step.variables));
+      }
+
+      if (step.calculation) {
+        sections.push("");
+        sections.push("Beregning:");
+        sections.push(convertToTINspire(step.calculation));
+      }
+
+      if (step.result) {
+        sections.push("");
+        sections.push("Resultat:");
+        sections.push(convertToTINspire(step.result));
+      }
+
+      sections.push("");
+      sections.push("");
+    });
+
+    const fullText = sections.join("\n");
+
+    try {
+      await navigator.clipboard.writeText(fullText);
+      toast.success("Alle mellemregninger kopieret (TI-Nspire format)");
+    } catch (error) {
+      toast.error("Kunne ikke kopiere til clipboard");
+    }
+  };
 
   if (logs.length === 0) {
     return (
@@ -146,10 +246,23 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
             mainboardLogs.map((log) => (
               <Card key={log.id}>
                 <CardHeader>
-                  <CardTitle className="text-lg">{log.title}</CardTitle>
-                  <CardDescription>
-                    {log.timestamp.toLocaleTimeString()} - {log.timestamp.toLocaleDateString()}
-                  </CardDescription>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="text-lg">{log.title}</CardTitle>
+                      <CardDescription>
+                        {log.timestamp.toLocaleTimeString()} - {log.timestamp.toLocaleDateString()}
+                      </CardDescription>
+                    </div>
+                    <Button
+                      variant="default"
+                      size="default"
+                      onClick={() => copyAllCalculations(log)}
+                      className="bg-primary hover:bg-primary/90 font-semibold shadow-md"
+                    >
+                      <ClipboardCopy className="h-5 w-5 mr-2" />
+                      Kopier alle til TI-Nspire
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <ScrollArea className="h-[600px] w-full">
@@ -195,10 +308,23 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
               {activeLog && activeLog.type === 'service' ? (
                 <Card key={activeLog.id} className="animate-in fade-in-50 duration-300">
                   <CardHeader>
-                    <CardTitle className="text-lg">{activeLog.title}</CardTitle>
-                    <CardDescription>
-                      {activeLog.timestamp.toLocaleTimeString()} - {activeLog.timestamp.toLocaleDateString()}
-                    </CardDescription>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <CardTitle className="text-lg">{activeLog.title}</CardTitle>
+                        <CardDescription>
+                          {activeLog.timestamp.toLocaleTimeString()} - {activeLog.timestamp.toLocaleDateString()}
+                        </CardDescription>
+                      </div>
+                      <Button
+                        variant="default"
+                        size="default"
+                        onClick={() => copyAllCalculations(activeLog)}
+                        className="bg-primary hover:bg-primary/90 font-semibold shadow-md"
+                      >
+                        <ClipboardCopy className="h-5 w-5 mr-2" />
+                        Kopier alle til TI-Nspire
+                      </Button>
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <ScrollArea className="h-[600px] w-full">
@@ -328,12 +454,25 @@ export function CalculationLog({ logs, onClear }: CalculationLogProps) {
                               {activeLog && activeLog.type === 'group' && apartmentLogs.find(l => l.id === activeLogId) ? (
                                 <Card key={activeLog.id} className="animate-in fade-in-50 duration-300">
                                   <CardHeader>
-                                    <CardTitle className="text-lg">
-                                      {activeLog.title.includes("||") ? activeLog.title.split("||")[2] : activeLog.title}
-                                    </CardTitle>
-                                    <CardDescription>
-                                      {activeLog.timestamp.toLocaleTimeString()} - {activeLog.timestamp.toLocaleDateString()}
-                                    </CardDescription>
+                                    <div className="flex items-center justify-between">
+                                      <div>
+                                        <CardTitle className="text-lg">
+                                          {activeLog.title.includes("||") ? activeLog.title.split("||")[2] : activeLog.title}
+                                        </CardTitle>
+                                        <CardDescription>
+                                          {activeLog.timestamp.toLocaleTimeString()} - {activeLog.timestamp.toLocaleDateString()}
+                                        </CardDescription>
+                                      </div>
+                                      <Button
+                                        variant="default"
+                                        size="default"
+                                        onClick={() => copyAllCalculations(activeLog)}
+                                        className="bg-primary hover:bg-primary/90 font-semibold shadow-md"
+                                      >
+                                        <ClipboardCopy className="h-5 w-5 mr-2" />
+                                        Kopier alle til TI-Nspire
+                                      </Button>
+                                    </div>
                                   </CardHeader>
                                   <CardContent>
                                     <ScrollArea className="h-[600px] w-full">

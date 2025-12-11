@@ -49,7 +49,7 @@ interface ServiceCable {
   tripTime: string;
   fuseManufacturer: string;
   segments: SegmentData[];
-  results?: any;
+  results?: Record<string, unknown>;
 }
 
 interface GroupData {
@@ -66,7 +66,7 @@ interface GroupData {
   KjJord: string;
   autoSize: boolean;
   segments: SegmentData[];
-  results?: any;
+  results?: Record<string, unknown>;
 }
 
 // Helper function to get available fuse sizes based on fuse type
@@ -231,7 +231,8 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [serviceCable, groups]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceCable, groups]); // calculateServiceCable and calculateGroups are stable functions
 
   // Initial calculation
   useEffect(() => {
@@ -242,7 +243,8 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
         calculateGroups();
       }, 100);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   function getDefaultServiceCable(): ServiceCable {
     return {
@@ -665,7 +667,7 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
         const duMax = parseFloat(group.maxVoltageDrop.replace(",", "."));
         const KjJord = parseFloat(group.KjJord.replace(",", ".") || "1.0");
 
-        let groupResults: any = {
+        const groupResults = {
           netVoltage: Uv,
           chosenSize: null,
           totalVoltageDropPercent: 0,
@@ -1127,7 +1129,7 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
 
               <div className="space-y-1">
                 <Label htmlFor="phases">Fasesystem</Label>
-                <Select value={serviceCable.phases} onValueChange={(v: any) => setServiceCable(prev => ({ ...prev, phases: v }))}>
+                <Select value={serviceCable.phases} onValueChange={(v) => setServiceCable(prev => ({ ...prev, phases: v as "1-faset" | "3-faset" }))}>
                   <SelectTrigger id="phases">
                     <SelectValue />
                   </SelectTrigger>
@@ -1140,7 +1142,7 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
 
               <div className="space-y-1">
                 <Label htmlFor="material">Materiale</Label>
-                <Select value={serviceCable.material} onValueChange={(v: any) => setServiceCable(prev => ({ ...prev, material: v }))}>
+                <Select value={serviceCable.material} onValueChange={(v) => setServiceCable(prev => ({ ...prev, material: v as "Cu" | "Al" }))}>
                   <SelectTrigger id="material">
                     <SelectValue />
                   </SelectTrigger>
@@ -1202,7 +1204,7 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
 
               <div className="space-y-1">
                 <Label htmlFor="autoSize">Auto tværsnit</Label>
-                <Select value={serviceCable.autoSize} onValueChange={(v: any) => setServiceCable(prev => ({ ...prev, autoSize: v }))}>
+                <Select value={serviceCable.autoSize} onValueChange={(v) => setServiceCable(prev => ({ ...prev, autoSize: v === "true" }))}>
                   <SelectTrigger id="autoSize">
                     <SelectValue />
                   </SelectTrigger>
@@ -1410,14 +1412,14 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
                         <Label>Fasesystem</Label>
                         <Select
                           value={group.phase}
-                          onValueChange={(value: any) => {
+                          onValueChange={(value: string) => {
                             if (value === "1-faset" && !group.selectedPhase) {
                               const onePhasedGroups = groups.filter(g => g.phase === "1-faset" && g.id !== group.id);
                               const phaseRotation: ("L1" | "L2" | "L3")[] = ["L1", "L2", "L3"];
                               const nextPhase = phaseRotation[onePhasedGroups.length % 3];
-                              updateGroup(group.id, { phase: value, selectedPhase: nextPhase });
+                              updateGroup(group.id, { phase: value as "1-faset" | "3-faset", selectedPhase: nextPhase });
                             } else {
-                              updateGroup(group.id, { phase: value });
+                              updateGroup(group.id, { phase: value as "1-faset" | "3-faset" });
                             }
                           }}
                         >
@@ -1435,7 +1437,7 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
                         <Label>Vælg fase</Label>
                         <Select
                           value={group.selectedPhase || "L1"}
-                          onValueChange={(value: any) => updateGroup(group.id, { selectedPhase: value })}
+                          onValueChange={(value) => updateGroup(group.id, { selectedPhase: value as "L1" | "L2" | "L3" })}
                           disabled={group.phase !== "1-faset"}
                         >
                           <SelectTrigger>
@@ -1455,7 +1457,7 @@ export function MixedUseCalculations({ addLog }: MixedUseCalculationsProps) {
                         <Label>Materiale</Label>
                         <Select
                           value={group.material}
-                          onValueChange={(value: any) => updateGroup(group.id, { material: value })}
+                          onValueChange={(value) => updateGroup(group.id, { material: value as "Cu" | "Al" })}
                         >
                           <SelectTrigger>
                             <SelectValue />

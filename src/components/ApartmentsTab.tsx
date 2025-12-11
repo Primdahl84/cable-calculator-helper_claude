@@ -49,11 +49,21 @@ interface SharedServiceCable {
   maxVoltageDrop?: string;
   ikTrafo?: string;
   cosTrafo?: string;
+  segments?: SegmentData[];  // Segment data for shared service cables
 }
 
 import type { ApartmentData } from "./ApartmentDetailView";
 import { ApartmentDetailView } from "./ApartmentDetailView";
 import type { SegmentData } from "@/lib/calculations";
+import {
+  getCableImpedancePerKm,
+  ikMinStik,
+  ikMaxStik,
+  thermalOk,
+  formatCurrentWithAngle,
+} from "@/lib/calculations";
+import { getFuseData, fuseTripTimeExplain } from "@/lib/fuseCurves";
+import type { CalculationStep } from "./CableCalculator";
 
 const createDefaultSegment = (): SegmentData => ({
   installMethod: "C",
@@ -84,7 +94,7 @@ const createDefaultGroup = (index: number) => ({
 
 interface ApartmentsTabProps {
   filterServiceCableId?: string | null; // null = show all, undefined = show all, string = filter by cable ID
-  onAddLog?: (title: string, type: 'service' | 'group', steps: any[]) => void;
+  onAddLog?: (title: string, type: 'service' | 'group', steps: CalculationStep[]) => void;
 }
 
 const createDefaultApartment = (index: number, unitType: "residential" | "commercial" = "residential", firstSharedCableId?: string): ApartmentData => {
@@ -159,7 +169,7 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
           cosTrafo: '0.3'
         }];
         // Ensure all cables have default values
-        return cables.map((cable: any) => ({
+        return cables.map((cable: SharedServiceCable) => ({
           id: cable.id,
           name: cable.name,
           calculationMethod: cable.calculationMethod,
@@ -170,7 +180,8 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
           material: cable.material || 'Cu',
           maxVoltageDrop: cable.maxVoltageDrop || '1.0',
           ikTrafo: cable.ikTrafo || '16000',
-          cosTrafo: cable.cosTrafo || '0.3'
+          cosTrafo: cable.cosTrafo || '0.3',
+          segments: cable.segments  // Include segments if present
         }));
       } catch {
         return [{
@@ -216,7 +227,7 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
         const firstSharedCableId = parsed.sharedServiceCables?.[0]?.id || null;
         const apts = parsed.apartments || [createDefaultApartment(0, "residential", firstSharedCableId || undefined)];
           // Ensure each apartment has groups, serviceCableSegments, unitType, and sharedServiceCableId
-        return apts.map((apt: any) => {
+        return apts.map((apt: Partial<ApartmentData>) => {
           const serviceCableId = apt.sharedServiceCableId !== undefined 
             ? apt.sharedServiceCableId 
             : (apt.useSharedServiceCable !== false ? firstSharedCableId : null);
@@ -367,16 +378,16 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
     setApartments((prev) => prev.filter((a) => a.id !== id));
   };
 
-  const copyApartment = (apartmentToCopy: any) => {
+  const copyApartment = (apartmentToCopy: ApartmentData) => {
     // Create a deep copy of the apartment with new ID and name
-    const newApartment = {
+    const newApartment: ApartmentData = {
       ...apartmentToCopy,
       id: `apt-${Date.now()}`,
       name: `${apartmentToCopy.name} kopi`,
-      groups: apartmentToCopy.groups.map((group: any) => ({
+      groups: apartmentToCopy.groups.map((group) => ({
         ...group,
         id: `group-${Date.now()}-${Math.random()}`,
-        segments: group.segments.map((seg: any) => ({ ...seg }))
+        segments: group.segments.map((seg) => ({ ...seg }))
       }))
     };
 
@@ -393,7 +404,7 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
     
     const unitsOnCable = apartments.filter(apt => apt.sharedServiceCableId === cableId);
     const method = cable.calculationMethod || "diversity";
-    const steps: any[] = [];
+    const steps: CalculationStep[] = [];
     
     // Step 1: Calculate power for each unit
     steps.push({
@@ -524,14 +535,171 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
       result: `Estimeret spændingsfald < 3% (afhænger af kabletype og længde)`
     });
 
-    // Step 5: Short circuit protection (simplified)
-    steps.push({
-      category: "kortslutning",
-      formula: "Kortslutningsbeskyttelse (estimeret)",
-      variables: `Sikring: ${recommendedFuse} A\nAntagelse: Transformator Ik ≈ 10 kA\nSikriingstype: "Diazed gG eller lignende"`,
-      calculation: `For fælles stikledninger kontrolleres:\n- Sikringen skal kunne afbryde kortslutningsstrøm\n- Triptime skal være < 5 sekunder`,
-      result: `Sikring på ${recommendedFuse} A kan håndtere kortslutning ✓\n(Kræver fuld analyse med kabeldata)`
-    });
+    // Step 5: Short circuit protection (detailed with cable parameters from segments or assumed)
+    const kortslutningLines: string[] = [];
+
+    // Use cable configuration or defaults
+    const IkT = parseFloat(cable.ikTrafo?.replace(",", ".") || "16000");
+    const cosT = parseFloat(cable.cosTrafo?.replace(",", ".") || "0.3");
+    const material = cable.material || "Cu";
+    const fuseType = cable.fuseType || "Diazed gG";
+    const fuseManufacturer = "Standard";
+    const k = material === "Cu" ? 143 : 94;
+    const actualFuseRating = parseFloat(cable.fuseRating?.replace(",", ".") || recommendedFuse.toString());
+
+    // Try to read segment data from apartments connected to this shared cable
+    const toNumber = (value: unknown): number | null => {
+      if (typeof value === "number") return Number.isFinite(value) ? value : null;
+      if (typeof value === "string") {
+        const match = value.replace(",", ".").match(/-?\d+(\.\d+)?/);
+        if (match) {
+          const num = parseFloat(match[0]);
+          return Number.isFinite(num) ? num : null;
+        }
+      }
+      return null;
+    };
+
+    let finalCableLength = 0;
+    let finalCrossSection = 0;
+    let finalIsAssumed = true;
+
+    // For shared service cables, read segments from one of the connected apartments
+    if (unitsOnCable.length > 0) {
+      // Find the first apartment with serviceCableSegments configured
+      for (const apt of unitsOnCable) {
+        if (apt.serviceCableSegments && apt.serviceCableSegments.length > 0) {
+          const len = apt.serviceCableSegments.reduce((sum, seg) => sum + (toNumber(seg.length) || 0), 0);
+          const cs = toNumber(apt.serviceCableSegments[0]?.crossSection);
+
+          if (len && len > 0 && cs && cs > 0) {
+            finalCableLength = len;
+            finalCrossSection = cs;
+            finalIsAssumed = false;
+            break;
+          }
+        }
+      }
+    }
+
+    // Fallback if no segment data found
+    if (finalCableLength <= 0) {
+      finalCableLength = 30; // Default assumption
+      finalIsAssumed = true;
+    }
+    if (finalCrossSection <= 0) {
+      finalCrossSection = 10; // Default assumption
+      finalIsAssumed = true;
+    }
+
+    const voltage = 400; // V
+    const phases = "3-faset";
+
+    if (finalIsAssumed) {
+      kortslutningLines.push("=== ANTAGELSER (ingen segment-data fundet) ===");
+      kortslutningLines.push(`Kabellængde: ${finalCableLength}m (antaget)`);
+      kortslutningLines.push(`Kabeltværsnit: ${finalCrossSection}mm² (antaget)`);
+      kortslutningLines.push(`Materiale: ${material}`);
+      kortslutningLines.push("⚠️ Konfigurer segment-data i stiklednings-fanen for præcise beregninger");
+    } else {
+      kortslutningLines.push("=== KABELDATA ===");
+      kortslutningLines.push(`Kabellængde: ${finalCableLength}m`);
+      kortslutningLines.push(`Kabeltværsnit: ${finalCrossSection}mm²`);
+      kortslutningLines.push(`Materiale: ${material}`);
+    }
+    kortslutningLines.push("");
+
+    // Get cable impedance
+    const impPerKm = getCableImpedancePerKm(finalCrossSection, material, phases);
+    const factor = finalCableLength / 1000;
+    const Zw1Min = { R: impPerKm.R * 1.5 * factor, X: impPerKm.X * factor };
+    const Zw1Max = { R: impPerKm.R * factor, X: impPerKm.X * factor };
+
+    kortslutningLines.push("=== Kabelimpedans ===");
+    const Zw1Mag = Math.sqrt(Zw1Min.R * Zw1Min.R + Zw1Min.X * Zw1Min.X);
+    const Zw1Angle = Math.atan2(Zw1Min.X, Zw1Min.R) * (180 / Math.PI);
+    kortslutningLines.push(`L_total = ${finalCableLength}m`);
+    kortslutningLines.push(`R/km = ${impPerKm.R.toFixed(5)} Ω/km, X/km = ${impPerKm.X.toFixed(5)} Ω/km`);
+    kortslutningLines.push(`Z_w1 = (${finalCableLength}/1000) × (1.5×${impPerKm.R.toFixed(5)} + i×${impPerKm.X.toFixed(5)})`);
+    kortslutningLines.push(`Z_w1 = ${Zw1Min.R.toFixed(5)} + i×${Zw1Min.X.toFixed(5)} Ω`);
+    kortslutningLines.push(`|Z_w1| = ${Zw1Mag.toFixed(5)} ∠${Zw1Angle.toFixed(2)}° Ω`);
+    kortslutningLines.push("");
+
+    // Calculate Imin from fuse data
+    try {
+      const { IminFactor } = getFuseData(fuseManufacturer, fuseType, actualFuseRating);
+      const IminSup = actualFuseRating * IminFactor;
+
+      kortslutningLines.push("=== Forsyningsimpedans ===");
+      const ZsupMin = voltage / IminSup;
+      kortslutningLines.push(`I_min_forsyning = In × ${IminFactor.toFixed(2)} = ${actualFuseRating} × ${IminFactor.toFixed(2)} = ${IminSup.toFixed(1)} A`);
+      kortslutningLines.push(`Z_sup_min = U_n / I_min_forsyning = ${voltage} / ${IminSup.toFixed(1)} = ${ZsupMin.toFixed(5)} Ω`);
+      kortslutningLines.push("");
+
+      // Calculate Ik,min and Ik,max
+      const { Ik: IkMin, angle: IkMinAngle } = ikMinStik(voltage, IminSup, Zw1Min);
+      const { Ik: IkMax, angle: IkMaxAngle } = ikMaxStik(voltage, IkT, cosT, Zw1Max);
+
+      kortslutningLines.push("=== Ik,min beregning ===");
+      kortslutningLines.push(`Ik,min = U_n / (Z_sup_min + 2×Z_w1)`);
+      kortslutningLines.push(`Ik,min = ${voltage} / (${ZsupMin.toFixed(5)} + 2×${Zw1Mag.toFixed(5)})`);
+      kortslutningLines.push(`Ik,min = ${IkMin.toFixed(2)} A ∠${IkMinAngle.toFixed(2)}°`);
+      kortslutningLines.push("");
+
+      kortslutningLines.push("=== Ik,max beregning ===");
+      const Zw1MaxMag = Math.sqrt(Zw1Max.R * Zw1Max.R + Zw1Max.X * Zw1Max.X);
+      kortslutningLines.push(`Ik,max beregnet fra trafo: ${IkT.toFixed(1)} A, cos φ = ${cosT.toFixed(3)}`);
+      kortslutningLines.push(`Z_w1_max = ${Zw1MaxMag.toFixed(5)} Ω`);
+      kortslutningLines.push(`Ik,max = ${IkMax.toFixed(2)} A ∠${IkMaxAngle.toFixed(2)}°`);
+      kortslutningLines.push("");
+
+      // Get fuse curve and trip time
+      const { curvePoints, InCurve } = getFuseData(fuseManufacturer, fuseType, actualFuseRating);
+      const useAbsoluteIk = fuseType === "Diazed gG" || fuseType === "Neozed gG" ||
+                           fuseType.startsWith("Knivsikring");
+      const { time: tTrip } = fuseTripTimeExplain(InCurve, IkMin, curvePoints, useAbsoluteIk);
+
+      kortslutningLines.push("=== Springetid fra sikringskurve ===");
+      kortslutningLines.push(`Sikring: ${fuseType} ${actualFuseRating} A`);
+      kortslutningLines.push(`Ik,min = ${IkMin.toFixed(1)} A, In_kurve = ${InCurve.toFixed(1)} A`);
+      kortslutningLines.push(`m = Ik/In = ${(IkMin / InCurve).toFixed(2)}`);
+      const isMeltFuse = fuseType === "Diazed gG" || fuseType === "Neozed gG" ||
+                        fuseType.startsWith("Knivsikring");
+      kortslutningLines.push(`t_udkobling ≈ ${tTrip.toFixed(4)} s ${isMeltFuse && tTrip > 5.0 ? '✗ > 5 s' : '✓ OK'}`);
+      kortslutningLines.push("");
+
+      // Thermal check
+      const thermalCheck = thermalOk(k, finalCrossSection, IkMin, tTrip);
+      kortslutningLines.push("=== Termisk kontrol ===");
+      kortslutningLines.push(`k = ${k} (materiale konstant)`);
+      kortslutningLines.push(`S = ${finalCrossSection} mm²`);
+      kortslutningLines.push(`E_kabel = k²×S² = ${k}²×${finalCrossSection}² = ${thermalCheck.Ekabel.toFixed(0)} A²s`);
+      kortslutningLines.push(`E_bryde = I²×t = ${IkMin.toFixed(1)}²×${tTrip.toFixed(4)} = ${thermalCheck.Ebryde.toFixed(0)} A²s`);
+      kortslutningLines.push(`Termisk: ${thermalCheck.ok ? '✓ OK' : '✗ IKKE OK'} (${thermalCheck.Ekabel.toFixed(0)} ${thermalCheck.ok ? '≥' : '<'} ${thermalCheck.Ebryde.toFixed(0)} A²s)`);
+
+      if (finalIsAssumed) {
+        kortslutningLines.push("");
+        kortslutningLines.push("⚠️ OBS: Beregning baseret på antaget kabellængde og tværsnit!");
+        kortslutningLines.push("For præcis beregning skal kabeldata konfigureres i stiklednings-fanen.");
+      }
+
+      steps.push({
+        category: "kortslutning",
+        formula: "Kortslutningsbeskyttelse",
+        variables: kortslutningLines.join("\n"),
+        calculation: "",
+        result: thermalCheck.ok ? "Kortslutningsbeskyttelse OK (med antagelser)" : "Kortslutningsbeskyttelse IKKE OK"
+      });
+    } catch (error) {
+      console.error("Fejl i kortslutningsberegninger:", error);
+      steps.push({
+        category: "kortslutning",
+        formula: "Kortslutningsbeskyttelse",
+        variables: `Sikring: ${actualFuseRating} A\nFejl i beregning: ${error}`,
+        calculation: "",
+        result: "Kunne ikke beregne - kontroller sikringstype og parametre"
+      });
+    }
 
     onAddLog(`${cable.name} - Beregning`, "service", steps);
   };
@@ -544,7 +712,7 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
     if (!apt) return;
     
     const method = apt.individualServiceCableCalculationMethod || "sum";
-    const steps: any[] = [];
+    const steps: CalculationStep[] = [];
     
     // Step 1: Calculate power for the apartment
     const power = calculateApartmentPower(apt);
@@ -843,12 +1011,12 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
         const recommendedFuseSize = selectNearestFuseSize(load.totalAmps);
         const cable = sharedServiceCables.find(c => c.id === cableId);
         const currentFuseRating = parseFloat(cable?.fuseRating?.replace(",", ".") || "0");
-        
+
         if (recommendedFuseSize !== currentFuseRating) {
-          setSharedServiceCables(prev => prev.map(c => 
+          setSharedServiceCables(prev => prev.map(c =>
             c.id === cableId ? { ...c, fuseRating: recommendedFuseSize.toString() } : c
           ));
-          
+
           // Also update all apartments on this cable
           setApartments(prev => prev.map(apt => {
             if (apt.sharedServiceCableId === cableId && apt.serviceCable) {
@@ -865,17 +1033,64 @@ export function ApartmentsTab({ filterServiceCableId, onAddLog }: ApartmentsTabP
         }
       }
     });
-  }, [JSON.stringify(sharedCableLoads), JSON.stringify(sharedServiceCables.map(c => c.fuseRating))]);
+  }, [sharedCableLoads, sharedServiceCables]); // Using objects directly - React will re-run when references change
 
   // Auto-calculate shared service cables when apartments or cables change
   useEffect(() => {
     if (sharedServiceCables && sharedServiceCables.length > 0 && onAddLog) {
-      // Calculate all shared service cables
+      // Debounce recalculation to avoid excessive updates
+      const timeoutId = setTimeout(() => {
+        sharedServiceCables.forEach(cable => {
+          calculateSharedCableWithLogs(cable.id);
+        });
+      }, 300); // 300ms debounce
+
+      return () => clearTimeout(timeoutId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sharedServiceCables.length,
+    apartments.length,
+    // Also listen to segment data changes by serializing relevant data
+    JSON.stringify(apartments.map(apt => ({
+      id: apt.id,
+      sharedServiceCableId: apt.sharedServiceCableId,
+      serviceCableSegments: apt.serviceCableSegments?.map(seg => ({
+        length: seg.length,
+        crossSection: seg.crossSection,
+        installMethod: seg.installMethod
+      }))
+    })))
+  ]); // calculateSharedCableWithLogs and onAddLog are stable callbacks
+
+  // Recalculate when service cable results are updated (same-tab CustomEvent + cross-tab storage event)
+  useEffect(() => {
+    if (!onAddLog) return;
+
+    const recalc = () => {
       sharedServiceCables.forEach(cable => {
         calculateSharedCableWithLogs(cable.id);
       });
-    }
-  }, [sharedServiceCables.length]);
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key) return;
+      if (
+        event.key.startsWith("service-tab-state") &&
+        (event.key.endsWith("-results") || event.key.endsWith("-results-latest"))
+      ) {
+        recalc();
+      }
+    };
+
+    window.addEventListener("service-results-updated", recalc as EventListener);
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      window.removeEventListener("service-results-updated", recalc as EventListener);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [sharedServiceCables, calculateSharedCableWithLogs, onAddLog]);
 
   // Find selected apartment or use first one from filtered list
   const selectedApartment = selectedApartmentId 
